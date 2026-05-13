@@ -18719,15 +18719,6 @@ class Compiler
       polyrhs = is_poly_ret == 1 ? "sp_box_int(" + polyc + ")" : polyc
       emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_POLY_ARRAY) " + result_tmp + " = " + polyrhs + ";")
     end
-    if mname == "call"
-      ca = (arg_compiled.length > 0) ? arg_compiled.join(", ") : ""
-      if ca == ""
-        ca = "0"
-      end
-      pc = "sp_proc_call((sp_Proc *)" + recv_tmp + ".v.p, (mrb_int[]){" + ca + "})"
-      prhs = is_poly_ret == 1 ? "sp_box_int(" + pc + ")" : pc
-      emit("    if (" + recv_tmp + ".cls_id == SP_BUILTIN_PROC) " + result_tmp + " = " + prhs + ";")
-    end
   end
 
  # Try to compile str[i] <op> "c" as direct char comparison
