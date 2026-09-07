@@ -1128,6 +1128,16 @@ endif
 # syscall while another green thread must make progress deadlocked here and
 # nowhere else. The PCH is dropped on that path: it was built without
 # -DSP_THREADS and -Werror rejects the mismatch.
+# `bigopt` below: -O1 beats -O0 on a typical test, because the optimizer prunes
+# spinel_rt.h's 800+ unreferenced statics before codegen (see the OPT=-O1 note on
+# `check`). But the cost of the passes that stay is superlinear in the size of
+# ONE function, and a test's whole program is inlined into main. io_closed_stream
+# has a 5373-line main: 82s at -O1 against 1.6s at -O0, with a roughly cubic
+# curve through it (928 lines 0.9s, 3219 lines 15s, 4407 lines 43s). Past 2000
+# generated lines that one function dominates and -O0 wins by a wide margin. The
+# PCH is dropped with it, since it was built under the other -O and would not
+# load anyway. The binaries are the same speed here -- these are wide-API tests
+# rather than loops, 0.023s vs 0.024s on the worst one.
 define RUN_ONE_TEST
 @mkdir -p build/test-results
 @# Raise the descriptor soft limit toward the hard one, best effort. A test
@@ -1154,14 +1164,16 @@ $(SPINEL) "$<" $(SP_OV_FLAG) -c --no-line-map -o "$$cfile" 2>/dev/null && \
   if head -2 "$$cfile" | grep -q SP_TU_NO_POLY_RENDER; then pchuse="$(PCH_USE_NOPOLY)"; pchf="$(PCH_NOPOLY)"; fi; \
   [ -f "$$pchf" ] || pchuse=""; \
   xlibs=$$(sed -n 's|^/\* SPINEL_LINK: \(.*\) \*/$$|\1|p' "$$cfile" | tr '\n' ' '); \
+  bigopt=""; \
+  if [ "$$(wc -l < "$$cfile")" -ge 2000 ]; then bigopt="-O0"; pchuse=""; fi; \
   mtdef=""; rtlib="$(SP_RT_LIB)"; natobjs="$(BUNDLED_NATIVE_OBJS)"; mtld=""; \
   if grep -q SPINEL_USES_THREADS "$$cfile"; then \
     mtdef="$(MT_DEF)"; rtlib="$(SP_RT_MT_LIB)"; natobjs="$(BUNDLED_NATIVE_MT_OBJS)"; mtld="-lpthread"; pchuse=""; \
   fi; \
   if [ -n "$(TEST_SINGLE_INVOKE)" ]; then \
-    $(CC) $(CFLAGS) $(SP_OV_DEFINE) $$mtdef -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) $$pchuse -Ilib "$$cfile" $$natobjs $$rtlib $(LDFLAGS) -lm $$mtld $$xlibs $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
+    $(CC) $(CFLAGS) $$bigopt $(SP_OV_DEFINE) $$mtdef -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) $$pchuse -Ilib "$$cfile" $$natobjs $$rtlib $(LDFLAGS) -lm $$mtld $$xlibs $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
   else \
-    $(CC) $(CFLAGS) $(SP_OV_DEFINE) $$mtdef -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) $$pchuse -Ilib -c "$$cfile" -o "$$cfile.o" 2>/dev/null && \
+    $(CC) $(CFLAGS) $$bigopt $(SP_OV_DEFINE) $$mtdef -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) $$pchuse -Ilib -c "$$cfile" -o "$$cfile.o" 2>/dev/null && \
     $(CC) $(CFLAGS) "$$cfile.o" $$natobjs $$rtlib $(LDFLAGS) -lm $$mtld $$xlibs $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
   fi; }; \
 if [ $$? -eq 0 ]; then \
