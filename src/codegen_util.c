@@ -926,8 +926,12 @@ int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
      mutation, e.g. `subs[0].topic << x`): the emitted read IS the sp_String*
      expression. Declined when it does not fit the caller's buffer (the
      branches then fall through to the value-form arms). */
+  /* strbuf_handle_demand is the same demand carried without the type: a mark
+     made after the node-type cache is finalized cannot move the type without
+     moving the call off the surface that dispatches it (see compiler.h). */
   if (recv >= 0 && nt_kind(c->nt, recv) == NK_CallNode &&
-      c->strbuf_box[recv] && comp_ntype(c, recv) == TY_STRBUF) {
+      ((c->strbuf_box[recv] && comp_ntype(c, recv) == TY_STRBUF) ||
+       c->strbuf_handle_demand[recv])) {
     Buf rb2; memset(&rb2, 0, sizeof rb2);
     emit_expr(c, recv, &rb2);
     /* A container ELEMENT read comes back BOXED (a poly array element, a hash

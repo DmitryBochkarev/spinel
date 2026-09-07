@@ -448,6 +448,16 @@ typedef struct {
                           read yields the sp_String* HANDLE (typed TY_STRBUF,
                           boxed SP_BUILTIN_STRBUF), not the demoted cstr
                           (#3227 phase 3) */
+  unsigned char *strbuf_handle_demand; /* [node_cap] the same demand -- hand out
+                          the HANDLE, not a reading of it -- carried WITHOUT
+                          moving the node's type. strbuf_box above is read as
+                          the type as well: infer_uncached answers TY_STRBUF
+                          for a marked node and comp_ntype keeps TY_STRBUF only
+                          while the mark is set. The emitters dispatch on the
+                          receiver's type, so marking a receiver moves the call
+                          out of the surface that answers it -- `equal?` over a
+                          reader left the String arm entirely. This array says
+                          only what the mark was for (#4363). */
   TyKind *nilnarrow; /* [node_cap] param-read narrowed by a `return .. if p.nil?`
                         guard: the read's non-nil type (codegen unboxes the poly
                         slot at the read site); TY_UNKNOWN = not narrowed */
@@ -801,6 +811,11 @@ static inline TyKind comp_ntype(const Compiler *c, int id) {
      mutation is observable through the container it is stored in (#3227). */
   TyKind t = c->ntype[id];
   if (t == TY_STRBUF) return c->strbuf_box[id] ? TY_STRBUF : TY_STRING;
+  /* A node under a handle demand STORES as the handle -- a temp spilled from
+     it has to be an sp_String *, not a const char * -- while still dispatching
+     as a String, which comp_recv_type answers for. That split is the whole
+     point of the second array (#4363). */
+  if (c->strbuf_handle_demand[id]) return TY_STRBUF;
   return t;
 }
 

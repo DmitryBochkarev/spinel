@@ -16,6 +16,13 @@ static int g_poly_redispatch_id = -1;
 
 TyKind comp_recv_type(Compiler *c, int recv) {
   TyKind t = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+  /* The emitters pick their arm from this, and a handle demand is about how
+     the value is HANDED OVER, not about which surface answers the call: a
+     String under one still answers String's methods. Without this, marking
+     `obj.reader` for `equal?` took the call off the String surface and it
+     compiled to "unsupported call" (#4363). */
+  if (recv >= 0 && t == TY_STRBUF && !c->strbuf_box[recv] && c->strbuf_handle_demand[recv])
+    t = TY_STRING;
   if (t != TY_UNKNOWN || recv < 0) return t;
   const char *ty = nt_type(c->nt, recv);
   int en = 0;
@@ -9924,6 +9931,14 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
           else emit_expr(c, argv[1], b);
           buf_puts(b, ")");
         }
+        else if (mt == TY_STRBUF && c->strbuf_handle_demand[id]) {
+          /* the caller asked for the HANDLE, not a reading of it. The
+             out-of-line reader answers the same way for the same demand;
+             inlined, it copied regardless, so `obj.reader.equal?(x)` compared
+             two fresh copies and answered false for one object (#4363). */
+          buf_puts(b, "("); emit_expr(c, recv, b);
+          buf_printf(b, ")%siv_%s", acc, iv_c(sym + 1));
+        }
         else if (mt == TY_STRBUF) {
           /* a shared-mutable slot reads out as a GC copy; the raw handle
              must not leak into a plain string context (#3227) */
@@ -10020,7 +10035,9 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, "({ sp_String *_t%d = (", tvR);
           emit_expr(c, recv, b);
           buf_printf(b, ")%siv_%s; ", comp_ty_value_obj(c, rt) ? "." : "->", iv_c(rn2));
-          if (c->strbuf_box[id])
+          /* either mark is the same demand: strbuf_box carries it with the
+             node's type, strbuf_handle_demand without it (see compiler.h) */
+          if (c->strbuf_box[id] || c->strbuf_handle_demand[id])
             buf_printf(b, "_t%d; })", tvR);
           else
             buf_printf(b, "_t%d ? sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1])) : NULL; })",

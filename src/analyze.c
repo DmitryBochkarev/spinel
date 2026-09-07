@@ -10518,6 +10518,44 @@ static int an_call_targets_scope(Compiler *c, int u, int mi2, Scope *m2) {
   return comp_method_in_class(c, cid, "initialize") == mi2;
 }
 
+/* `obj.reader.equal?(x)` and `x.equal?(obj.reader)` ask whether two names are
+   one object, and a reader that hands out a reading of the slot answers no for
+   an object that IS shared. The in-fixpoint rule beside the container stores
+   marks the argument side, but it cannot see a slot promoted after the
+   fixpoint -- a parameter retained in an ivar becomes a handle below -- so the
+   demand is made again once every promotion has settled.
+
+   It goes in strbuf_handle_demand rather than strbuf_box because the two mean
+   different things here: strbuf_box is read as the node's TYPE as well, and
+   the emitters pick their arm from the receiver's type, so marking a receiver
+   moves `equal?` off the String surface that answers it. This says only "hand
+   out the handle" (#4363). */
+static int mark_reader_identity_operands(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  for (int w = 0; w < nt->count; w++) {
+    if (nt_kind(nt, w) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, w, "name");
+    if (!nm || (!sp_streq(nm, "equal?") && !sp_streq(nm, "eql?"))) continue;
+    int recv = nt_ref(nt, w, "receiver");
+    int a = nt_ref(nt, w, "arguments");
+    int ac = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    if (recv < 0 || ac != 1) continue;
+    for (int side = 0; side < 2; side++) {
+      int opnd = side == 0 ? av[0] : recv;
+      if (opnd < 0 || c->strbuf_box[opnd] || c->strbuf_handle_demand[opnd]) continue;
+      char ivb[300]; int defc = -1;
+      const char *ivn = an_reader_ivar_of(c, opnd, &defc, ivb, sizeof ivb);
+      if (!ivn || defc < 0) continue;
+      int iv = comp_ivar_index(&c->classes[defc], ivn);
+      if (iv < 0 || !c->classes[defc].ivar_str_shared[iv]) continue;
+      c->strbuf_handle_demand[opnd] = 1;
+      changed = 1;
+    }
+  }
+  return changed;
+}
+
 static int convert_byref_handle_params(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -14340,6 +14378,7 @@ void analyze_program(Compiler *c) {
     if (convert_byref_handle_params(c)) ch = 1;
     if (!ch) break;
   }
+  mark_reader_identity_operands(c);
 
   /* Promote `<<`-appended string locals to mutable strings (TY_STRBUF) so the
      append is amortized O(1) instead of an O(n) copy-concat (which makes a

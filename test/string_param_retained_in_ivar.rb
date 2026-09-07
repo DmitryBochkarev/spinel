@@ -165,3 +165,19 @@ w.s << "!"
 p [w.s, o]
 o << "?"
 p [w.s, o]
+
+# Identity, not only visibility: two names for one shared string answer
+# equal? true, read through a reader on either side. The mark that makes a
+# reader hand out the handle is also how the node's type is read, and the
+# emitters pick their arm from the receiver's type -- so the demand travels in
+# its own array, and the receiver still dispatches as the String it is.
+i = +"iii"
+h3 = Holder.new(i)
+h3.bump
+p [h3.bt.equal?(i), i.equal?(h3.bt), h3.bt.equal?(h3.bt)]
+
+# NOT covered, and left out on purpose: one parameter stored into TWO ivars
+# where only one is mutated. The mutated slot becomes a handle; the other has
+# no evidence of its own and stays a value, so the second name does not see the
+# mutation. That needs "a handle assigned to an ivar makes that ivar a handle",
+# which is a rule that does not exist yet.
