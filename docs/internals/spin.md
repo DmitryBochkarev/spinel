@@ -269,6 +269,12 @@ specification:* `spin lock --update` and `--frozen` (CI mode).
   excluded from compilation rather than from inclusion. Globs are expanded at
   manifest-read time into the same exact-path list `[[build]]` workdirs
   already travel in, so naming a directory prunes its subtree.
+- **Spinel emits over its own output only** (implemented; #4362). `-c -o P`
+  refuses when P exists and does not open with the compiler's banner, since
+  emitting there replaces a source with a translation unit and nothing
+  downstream can undo that -- the rule below can only report that the file
+  is gone. `--force` is the way through. This is the destructive half of
+  the asymmetry; the rule below is the noisy half.
 - **Spinel's own output is not carried C** (implemented; #4362). A `.c` whose
   first line is the compiler's banner is left out of discovery and named on
   stderr. It defines `main` and, through the internal `spinel_rt.h`, a copy of
