@@ -2372,7 +2372,7 @@ static void sp_with_index_gen(sp_Fiber *f) {
   for (;;) {
     sp_RbVal v;
     if (s->gen) {
-      if (!s->fib) { s->fib = sp_Fiber_new(s->gen); if (s->gen_cap) { sp_gc_wb((void*)s->fib); s->fib->user_data = s->gen_cap; } }
+      if (!s->fib) { s->fib = sp_Fiber_new(s->gen); sp_gc_wb((void*)s); if (s->gen_cap) { sp_gc_wb((void*)s->fib); s->fib->user_data = s->gen_cap; } }
       if (!sp_Fiber_alive(s->fib)) break;
       v = sp_Fiber_resume(s->fib, sp_box_nil());
       if (!sp_Fiber_alive(s->fib)) break;
@@ -2468,13 +2468,14 @@ sp_PtrArray*sp_IntArray_permutation(sp_IntArray*a,sp_int k){SP_GC_ROOT(a);sp_Ptr
 sp_RbVal sp_enum_gen_pull(sp_Enumerator *e) {SP_GC_ROOT(e); sp_gc_wb((void*)e);
   if (!e->fib) {
     e->fib = sp_Fiber_new(e->gen);
+    sp_gc_wb((void*)e);   /* sp_Fiber_new can collect: the record made on entry is gone by here */
     if (e->gen_cap) { sp_gc_wb((void*)e->fib); e->fib->user_data = e->gen_cap; }
   }
   if (!sp_Fiber_alive(e->fib)) sp_raise_stop_iteration(e->gen_result);
   sp_RbVal feed = e->has_feed ? e->feed : sp_box_nil();
   e->has_feed = FALSE; e->feed = sp_box_nil();   /* consumed by this resume */
   sp_RbVal v = sp_Fiber_resume(e->fib, feed);
-  if (!sp_Fiber_alive(e->fib)) { e->gen_result = v; sp_raise_stop_iteration(v); }
+  if (!sp_Fiber_alive(e->fib)) { e->gen_result = v; sp_gc_wb((void*)e); sp_raise_stop_iteration(v); }
   return v;
 }
 sp_RbVal sp_Enumerator_next(sp_Enumerator *e) {SP_GC_ROOT(e);
@@ -2487,7 +2488,7 @@ sp_RbVal sp_Enumerator_next(sp_Enumerator *e) {SP_GC_ROOT(e);
 }
 sp_RbVal sp_Enumerator_peek(sp_Enumerator *e) {SP_GC_ROOT(e); sp_gc_wb((void*)e);
   if (e->gen) {
-    if (!e->peeked) { e->peek_val = sp_enum_gen_pull(e); e->peeked = TRUE; }
+    if (!e->peeked) { e->peek_val = sp_enum_gen_pull(e); sp_gc_wb((void*)e); e->peeked = TRUE; }
     return e->peek_val;
   }
   if (!e->items || e->cursor >= e->items->len) sp_raise_stop_iteration(e->source);
