@@ -192,6 +192,7 @@ Environment variables:
 |-----------------------|------------------------------------------------------------------------|
 | `SPINEL_GC_STRESS`    | drops the thresholds to 2048 B, so nearly every allocation collects     |
 | `SPINEL_GC_VERIFY`    | registry check on every mark, plus a SIGSEGV/SIGBUS reporter naming the phase and object |
+| `SPINEL_GC_PHASES`    | adds a `[gcph]` line splitting collector time into mark / old sweep / slot sweep / remembered clear / string sweep / trim, named as the collector's own comments name them; arms the reporter on its own |
 | `SPINEL_MAX_HEAP_MB`  | RSS ceiling, checked at GC trigger points against `/proc/self/statm`; Linux only, off by default |
 
 ## Limits, and where the next work is

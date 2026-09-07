@@ -44,7 +44,7 @@ RBS_LIB      = build/librbs.a
 
 .PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
-        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench \
+        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test \
         gate-optcarrot clean install uninstall deps tools
 
 # `make all` includes the RBS extractor when vendor/rbs has been fetched
@@ -686,7 +686,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -800,6 +800,28 @@ reject-test: $(SPINEL)
 # One leg per barrier gap that shipped. A single program was what this target
 # ran when a store into a capture cell shipped with no barrier at all, so a
 # fix here adds its reproducer to the list rather than testing by hand.
+# SPINEL_GC_PHASES only reports; it must not change what a program computes, and
+# it must say nothing at all when it is off. Both halves are the contract, and
+# neither is visible to the ordinary harness, which cannot vary the environment
+# per test.
+gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+	@tmp=$$(mktemp -d /tmp/spinel-gcph.XXXXXX); ok=1; \
+	src=test/gc_minor_thread_local_slot.rb; \
+	$(SPINEL) "$$src" -o "$$tmp/m" >/dev/null 2>&1 || \
+	  { echo "gc-phases-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	$(TIMEOUT60) "$$tmp/m" > "$$tmp/off.out" 2> "$$tmp/off.err"; \
+	SPINEL_GC_PHASES=1 $(TIMEOUT60) "$$tmp/m" > "$$tmp/on.out" 2> "$$tmp/on.err"; \
+	if ! cmp -s "$$tmp/off.out" "$$tmp/on.out"; then \
+	  echo "gc-phases-test: FAIL (stdout differs with the flag set)"; \
+	  diff -u "$$tmp/off.out" "$$tmp/on.out" | head -10; ok=0; fi; \
+	if [ -s "$$tmp/off.err" ]; then \
+	  echo "gc-phases-test: FAIL (wrote to stderr with the flag unset)"; \
+	  head -3 "$$tmp/off.err"; ok=0; fi; \
+	if ! grep -q '^\[gcph\]' "$$tmp/on.err"; then \
+	  echo "gc-phases-test: FAIL (no [gcph] line with the flag set)"; ok=0; fi; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "gc-phases-test: pass"; else exit 1; fi
+
 GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_retval.rb \
                   test/gc_minor_thread_tls_first_write.rb \

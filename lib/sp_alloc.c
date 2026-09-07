@@ -168,6 +168,9 @@ static void sp_gc_stats_report(void) {
   static double last = 0;
   if (on < 0) {
     const char *e = getenv("SPINEL_GC_STATS"); on = (e && *e && *e != '0') ? 1 : 0;
+    /* SPINEL_GC_PHASES arms the same reporter on its own, so the breakdown does
+       not also require SPINEL_GC_STATS to be set. */
+    if (sp_gc_ph_on) on = 1;
     /* A program that exits before the next tick would otherwise report nothing
        but its first collection, so the totals are also printed on the way out.
        A server is killed rather than returning from main, which is why the
@@ -206,6 +209,18 @@ static void sp_gc_stats_emit(void) {
           (double)SP_GC_CTR_GET(sp_gc_bytes) / 1048576.0, (double)sbytes / 1048576.0,
           (double)SP_GC_CTR_GET(sp_gc_threshold) / 1048576.0,
           (double)SP_GC_CTR_GET(sp_str_threshold) / 1048576.0, nw);
+  if (!sp_gc_ph_on) return;
+  /* Which part of a collection cost that time. The names are the ones the
+     collector's own comments use, so a number leads to the code that spent it.
+     Under SP_THREADS the per-worker string sweep runs inside the slot sweep
+     (sp_sweep_one_slot), so `string sweep` is the serial path's figure and
+     reads zero on the threaded one. */
+  fprintf(stderr,
+          "[gcph] mark %.3fs  old sweep %.3fs  slot sweep %.3fs  "
+          "remembered clear %.3fs  string sweep %.3fs  trim %.3fs  of %.3fs total\n",
+          sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
+          sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim,
+          sp_gc_stat_seconds);
 }
 
 void sp_gc_retune_object(size_t before) {

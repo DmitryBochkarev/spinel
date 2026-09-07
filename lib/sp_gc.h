@@ -291,6 +291,12 @@ extern int sp_gc_verify_gen;
 extern int sp_gc_verify_gen_fail;
 extern int sp_gc_verify_probe_on, sp_gc_verify_probe_hit;
 extern unsigned sp_gc_verify_probe;
+/* Per-phase collector time, in seconds, cumulative (SPINEL_GC_PHASES=1; all
+   zero when it is off). sp_gc_stat_seconds is their sum plus the bookkeeping
+   between them. Reported by sp_alloc.c, which is where the stats line lives. */
+extern double sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
+              sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim;
+extern int sp_gc_ph_on;
 void sp_gc_collect(void);
 #ifdef SP_THREADS
 /* Sweep one worker's young list on that worker (see sp_gc.c). Survivors come
