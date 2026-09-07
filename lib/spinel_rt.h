@@ -10576,6 +10576,7 @@ static sp_PolyArray *sp_enum_hash_side(sp_RbVal h, int keyside) {
    touch the receiver's backing store. (The reverse_each-doesn't-mutate test
    guards this invariant if sp_enum_items_from is ever changed to share.) */
 static sp_Enumerator *sp_Enumerator_new_from_rev(sp_RbVal arr) {
+  SP_GC_ROOT_RBVAL(arr);   /* published into the enumerator below, after several allocations */
   sp_PolyArray *items = sp_enum_items_from(arr);
   SP_GC_ROOT(items);
   if (items) {
@@ -10597,7 +10598,8 @@ sp_Enumerator *sp_enum_of_one(sp_RbVal v, const char *meth);
    so the chain is a snapshot enumerator that reports as Enumerator::Chain. */
 static sp_Enumerator *sp_enum_chain_new(sp_RbVal arr) __attribute__((unused));
 static sp_Enumerator *sp_enum_chain_new(sp_RbVal arr) {
-  sp_PolyArray *items = sp_enum_items_from(arr);
+  SP_GC_ROOT_RBVAL(arr);
+  sp_PolyArray *items = sp_enum_items_from(arr); SP_GC_ROOT(items);   /* the enumerator below is an allocation */
   sp_Enumerator *e = sp_Enumerator_new_from_items(items);
   e->is_chain = TRUE;
   return e;
@@ -10605,6 +10607,7 @@ static sp_Enumerator *sp_enum_chain_new(sp_RbVal arr) {
 /* A blockless Array#each_with_index enumerator: an [element, index] pair for
    each element (index offset by `off`, as Enumerator#with_index(off) allows). */
 static sp_Enumerator *sp_Enumerator_new_ewi(sp_RbVal arr, sp_int off) {
+  SP_GC_ROOT_RBVAL(arr);   /* published into the enumerator below, after several allocations */
   sp_PolyArray *items = sp_enum_items_from(arr);
   SP_GC_ROOT(items);
   sp_PolyArray *pairs = sp_PolyArray_new();
@@ -10621,6 +10624,7 @@ static sp_Enumerator *sp_Enumerator_new_ewi(sp_RbVal arr, sp_int off) {
 }
 /* A blockless Array#each_index enumerator: the indices 0..len-1. */
 static sp_Enumerator *sp_Enumerator_new_indices(sp_RbVal arr) {
+  SP_GC_ROOT_RBVAL(arr);   /* published into the enumerator below, after several allocations */
   sp_PolyArray *items = sp_enum_items_from(arr);
   SP_GC_ROOT(items);
   sp_PolyArray *idx = sp_PolyArray_new();
@@ -10635,6 +10639,7 @@ static sp_Enumerator *sp_Enumerator_new_indices(sp_RbVal arr) {
    pushed slices alive. */
 /* arr.cycle(n) with no block: the elements repeated n whole times. */
 static sp_Enumerator *sp_Enumerator_new_cycle(sp_RbVal arr, sp_int n) {
+  SP_GC_ROOT_RBVAL(arr);   /* published into the enumerator below, after several allocations */
   sp_PolyArray *items = sp_enum_items_from(arr); SP_GC_ROOT(items);
   sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
   sp_int len = items ? items->len : 0;
@@ -10680,6 +10685,13 @@ static sp_bool sp_poly_case_eq(sp_RbVal pat, sp_RbVal e) {
   return sp_poly_eq(pat, e);
 }
 static sp_PolyArray *sp_poly_slice_groups(sp_RbVal arr, sp_RbVal pat, int after) {
+  /* The pattern is read on every element while the loop below allocates a
+     group per boundary, and it is a temporary at the call site
+     (`slice_after(2..3)` boxes a fresh Range). Unrooted, a collection inside
+     the loop took it and every later test answered false, so the whole array
+     came back as one group. `arr` is rooted for the same reason
+     sp_Enumerator_new_slices roots it: sp_enum_items_from allocates. */
+  SP_GC_ROOT_RBVAL(arr); SP_GC_ROOT_RBVAL(pat);
   sp_PolyArray *items = sp_enum_items_from(arr); SP_GC_ROOT(items);
   sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
   sp_PolyArray *cur = sp_PolyArray_new(); SP_GC_ROOT(cur);
