@@ -1747,7 +1747,15 @@ def cmd_publish(root, repo_override, ref_override, direct)
     spin_die("publish: index name \"" + name + "\" belongs to " + erepo + " (same name means the same library; rename per the name policy)") if erepo != repo
     i = 0
     while i < gdoc.array_len("release")
-      spin_die("publish: " + name + " " + version + " is already in the index") if gdoc.get("release." + i.to_s, "version") == version
+      # Compare the way the SOLVER does, not textually. vcmp pads the shorter
+      # side with zeros and reads each field as a number, so "1.2" and "1.2.0"
+      # -- and "2026.9.8" and "2026.09.08" -- are ONE version to every
+      # constraint, while a string compare lets both into the index. The
+      # duplicate then also splits the native object cache, whose directory
+      # name is the version as written.
+      ev = gdoc.get("release." + i.to_s, "version")
+      spin_die("publish: " + name + " " + version + " is already in the index" +
+               (ev == version ? "" : " (as \"" + ev + "\", which is the same version)")) if vcmp(ev, version) == 0
       i += 1
     end
     entry = File.read(gf)

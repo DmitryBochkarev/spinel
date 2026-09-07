@@ -275,6 +275,22 @@ grep -q '^ref = "[0-9a-f]\{40\}"$' "$WORK/index/packages/publib.toml" || fail "p
 OUT=$("$SPIN" publish --direct --repo https://example.com/you/spinel-publib 2>&1) \
   && fail "duplicate publish must be refused"
 echo "$OUT" | grep -q "already in the index" || fail "duplicate message"
+# The same version spelled differently is the same version. vcmp pads the
+# shorter side with zeros, so "0.1" and "0.1.0" satisfy exactly the same
+# constraints; a textual duplicate check let both into the index, and the
+# native object cache -- whose directory is the version AS WRITTEN -- then
+# split in two. Same shape as "2026.9.8" against "2026.09.08".
+sed 's/^version = "0.1.0"$/version = "0.1"/' spin.toml > spin.toml.t && mv spin.toml.t spin.toml
+git -c user.email=spin@e2e -c user.name=spin-e2e commit -qam "respell the version"
+git push -q origin HEAD
+git fetch -q origin
+OUT=$("$SPIN" publish --direct --repo https://example.com/you/spinel-publib 2>&1) \
+  && fail "a respelled version must be refused as the duplicate it is"
+echo "$OUT" | grep -q "which is the same version" || fail "respelled-duplicate message"
+sed 's/^version = "0.1"$/version = "0.1.0"/' spin.toml > spin.toml.t && mv spin.toml.t spin.toml
+git -c user.email=spin@e2e -c user.name=spin-e2e commit -qam "restore the version"
+git push -q origin HEAD
+git fetch -q origin
 OUT=$("$SPIN" publish --direct --repo https://example.com/other/spinel-publib 2>&1) \
   && fail "same name, different repo must be refused"
 echo "$OUT" | grep -q "name policy" || fail "name-policy message"

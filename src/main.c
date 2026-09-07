@@ -367,8 +367,12 @@ int main(int argc, char **argv) {
         }
         pclose(fp);
       }
-      if (ccv[0]) printf("spinel %s [%s]\n", SPINEL_BUILD_REV, ccv);
-      else printf("spinel %s\n", SPINEL_BUILD_REV);
+      /* Field order is load-bearing: tools/spin.rb's spinel_rev takes the
+         SECOND word as the toolchain identity for its probe records, and the
+         revision is what tells two builds of one release apart. The release
+         name goes after it. */
+      if (ccv[0]) printf("spinel %s (%s) [%s]\n", SPINEL_BUILD_REV, SPINEL_RELEASE, ccv);
+      else printf("spinel %s (%s)\n", SPINEL_BUILD_REV, SPINEL_RELEASE);
       return 0;
     }
     else if (sp_streq(a, "-e")) {
