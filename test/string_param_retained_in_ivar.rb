@@ -176,8 +176,24 @@ h3 = Holder.new(i)
 h3.bump
 p [h3.bt.equal?(i), i.equal?(h3.bt), h3.bt.equal?(h3.bt)]
 
-# NOT covered, and left out on purpose: one parameter stored into TWO ivars
-# where only one is mutated. The mutated slot becomes a handle; the other has
-# no evidence of its own and stays a value, so the second name does not see the
-# mutation. That needs "a handle assigned to an ivar makes that ivar a handle",
-# which is a rule that does not exist yet.
+# One parameter stored into TWO ivars where only one is mutated. The mutated
+# slot becomes a handle through its own evidence; the other has none of its
+# own, and what a handle is assigned to is a handle.
+class Pair
+  attr_reader :one, :two
+  def initialize(s)
+    @one = s
+    @two = s
+  end
+  def bump
+    @one << "!"
+  end
+end
+
+q = +"qqq"
+pr = Pair.new(q)
+pr.bump
+p [pr.one, pr.two, q]
+p [pr.one.equal?(q), pr.one.equal?(pr.two)]
+q << "?"
+p [pr.one, pr.two]

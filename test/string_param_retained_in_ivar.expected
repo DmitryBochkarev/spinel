@@ -17,3 +17,6 @@
 ["ooo!", "ooo!"]
 ["ooo!?", "ooo!?"]
 [true, true, true]
+["qqq!", "qqq!", "qqq!"]
+[true, true]
+["qqq!?", "qqq!?"]

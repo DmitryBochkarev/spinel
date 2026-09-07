@@ -10464,7 +10464,15 @@ static int promote_params_stored_in_shared_ivars(Compiler *c) {
          reader -- records nothing there, and the parameter written into it
          was left a value while the ivar itself was a handle (#4363). */
       int already = ivx0 >= 0 && c->classes[icid].ivar_str_shared[ivx0];
-      if (!already && mk != 1 && !(mk == -1 && (ivt0 == TY_STRING || ivt0 == TY_STRBUF)))
+      /* And the converse: the SLOT BEING WRITTEN is evidence too, once what is
+         written into it is already a handle. `def initialize(s) @one = s;
+         @two = s end` with only @one mutated made the parameter a handle
+         through @one, and @two -- having no mutator of its own -- kept a value
+         copy, so the second name did not see the mutation and was not the same
+         object. What a handle is assigned to is a handle (#4363). */
+      int src_is_handle = pp->type == TY_STRBUF && pp->str_shared;
+      if (!already && !src_is_handle &&
+          mk != 1 && !(mk == -1 && (ivt0 == TY_STRING || ivt0 == TY_STRBUF)))
         continue; }
     if (pp->type != TY_UNKNOWN && pp->type != TY_STRING &&
         pp->type != TY_STRBUF && pp->type != TY_POLY) continue;
