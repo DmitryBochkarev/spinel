@@ -5787,7 +5787,11 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
     if (is_all) buf_printf(g_pre, "sp_bool _t%d = TRUE;\n", tacc);
     else buf_printf(g_pre, "sp_int _t%d = 0;\n", tacc);
     emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) {\n", ti, ti, tlen, ti);
+    /* A cached Array length visits removed elements or misses appended ones.
+       Keep the existing traversal bound for other boxed receivers. */
+    buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < "
+               "(sp_rbval_is_array(_t%d) ? sp_poly_arr_len(_t%d) : _t%d); _t%d++) {\n",
+               ti, ti, trecv, trecv, tlen, ti);
     int bodyIndentP = g_indent + 1;
     {
       /* A multi-param block over a boxed receiver auto-splats each element,
