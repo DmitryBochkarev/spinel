@@ -1834,8 +1834,11 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   /* `x.to_json` -- CRuby's json defines it on every core class. A user class
      that defines its own wins (the dispatch below sees it); everything else
      serializes through the generator, exactly as JSON.generate(x) does. */
+  /* A boxed receiver is included: the generator handles whatever it holds, and
+     a user class's own #to_json still wins through the runtime hook. Excluding
+     it left `JSON.parse(s).to_json` unresolved (#4385). */
   if (recv >= 0 && sp_streq(name, "to_json") && nt_ref(nt, id, "block") < 0 &&
-      sp_feature_required("json") && rt != TY_UNKNOWN && rt != TY_POLY && !ty_is_object(rt))
+      sp_feature_required("json") && rt != TY_UNKNOWN && !ty_is_object(rt))
     { *out = TY_STRING; return 1; }
 
   /* poly.scan(re): a String read out of a container. Same shape as the

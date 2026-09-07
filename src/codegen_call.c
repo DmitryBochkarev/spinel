@@ -10104,7 +10104,18 @@ static int class_includes_module_named(Compiler *c, int cid, const char *mod_nam
    not one of them -- only a reopen of that builtin could be. */
 static int json_to_json_is_builtin(Compiler *c, int recv) {
   TyKind rt = comp_ntype(c, recv);
-  if (rt == TY_UNKNOWN || rt == TY_POLY || ty_is_object(rt)) return 0;
+  /* A BOXED receiver goes through the generator too. It used to be declined
+     with the static object types, on the reasoning that a user class defining
+     its own #to_json must keep the dispatch -- but only a STATIC object type
+     can be dispatched at compile time. Declining a boxed one did not route it
+     to a user method, it left the call unresolved, and `JSON.parse(s).to_json`
+     -- the shape the method exists for -- raised NoMethodError (#4385).
+     sp_json_val is the right answer for all three cases a boxed receiver can
+     hold: a builtin serializes, and a user object goes through
+     sp_obj_to_json_fn, which prefers that class's own #to_json exactly as
+     CRuby's json does (packages/json/sp_json.c). */
+  if (rt == TY_UNKNOWN || ty_is_object(rt)) return 0;
+  if (rt == TY_POLY) return 1;
   const char *bn = ty_is_hash(rt) ? "Hash"
                  : ty_is_array(rt) ? "Array"
                  : (rt == TY_STRING || rt == TY_STRBUF) ? "String"
