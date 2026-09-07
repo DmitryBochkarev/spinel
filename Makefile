@@ -782,18 +782,26 @@ reject-test: $(SPINEL)
 # only by the map between the write and the read -- under SPINEL_GC_MINOR=1.
 # It costs a fifth of a second, and it is the leg that was missing when a
 # barrier pointed at the wrong object shipped.
+# One leg per barrier gap that shipped. A single program was what this target
+# ran when a store into a capture cell shipped with no barrier at all, so a
+# fix here adds its reproducer to the list rather than testing by hand.
+GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
+                  test/proc_cell_capture_marked.rb
+
 gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcminor.XXXXXX); ok=1; \
-	src=test/gc_minor_thread_local_slot.rb; \
-	$(SPINEL) "$$src" -o "$$tmp/m" >/dev/null 2>&1 || \
-	  { echo "gc-minor-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
-	for mode in 0 1; do \
-	  SPINEL_GC_MINOR=$$mode $(TIMEOUT60) "$$tmp/m" > "$$tmp/out.$$mode" 2>&1; \
-	  rc=$$?; \
-	  if [ $$rc -ne 0 ]; then echo "gc-minor-test: FAIL (SPINEL_GC_MINOR=$$mode exited $$rc)"; tail -3 "$$tmp/out.$$mode"; ok=0; \
-	  elif ! cmp -s "$$tmp/out.$$mode" "$$src.expected"; then \
-	    echo "gc-minor-test: FAIL (SPINEL_GC_MINOR=$$mode output mismatch)"; \
-	    diff -u "$$src.expected" "$$tmp/out.$$mode" | head -10; ok=0; fi; \
+	for src in $(GC_MINOR_TESTS); do \
+	  bn=$$(basename "$$src" .rb); \
+	  $(SPINEL) "$$src" -o "$$tmp/$$bn" >/dev/null 2>&1 || \
+	    { echo "gc-minor-test: FAIL ($$bn: compile)"; ok=0; continue; }; \
+	  for mode in 0 1; do \
+	    SPINEL_GC_MINOR=$$mode $(TIMEOUT60) "$$tmp/$$bn" > "$$tmp/$$bn.$$mode" 2>&1; \
+	    rc=$$?; \
+	    if [ $$rc -ne 0 ]; then echo "gc-minor-test: FAIL ($$bn: SPINEL_GC_MINOR=$$mode exited $$rc)"; tail -3 "$$tmp/$$bn.$$mode"; ok=0; \
+	    elif ! cmp -s "$$tmp/$$bn.$$mode" "$$src.expected"; then \
+	      echo "gc-minor-test: FAIL ($$bn: SPINEL_GC_MINOR=$$mode output mismatch)"; \
+	      diff -u "$$src.expected" "$$tmp/$$bn.$$mode" | head -10; ok=0; fi; \
+	  done; \
 	done; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
