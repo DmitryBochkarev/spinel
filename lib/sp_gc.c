@@ -237,6 +237,12 @@ void sp_gc_wb_slow(void *obj) {
         pm == 0xfe || pm == 0xfc || pm == 0xfb) return; }
   sp_gc_hdr *h = (sp_gc_hdr *)obj - 1;
   if (!h->old || h->dirty) return;
+  /* The bit goes up before the entry goes in, so between here and the push an
+     object carries it with nothing naming it. The collector's clear reads the
+     array and so depends on never observing that: nothing below allocates or
+     polls a safepoint, so a worker cannot park inside this function, and a
+     collection waits for every worker to park. Add an allocation or a poll
+     below and that clear has to go back to walking the old list. */
   h->dirty = 1;
 #ifdef SP_THREADS
   /* Mutators run this concurrently, so the slot has to be claimed atomically:
@@ -535,21 +541,25 @@ void sp_gc_collect(void){
     /* the old sweep above cleared every survivor; the array may name objects it
        just freed, so it must not be walked here */
   }
-#ifdef SP_THREADS
-  /* A worker can be preempted between sp_gc_wb's `h->dirty = 1` and its push,
-     so an object can carry the bit without an entry -- and clearing only what
-     the array holds would leave it dirty forever, which is the one state that
-     turns off its barrier for good. Single-threaded, no collection can start
-     inside sp_gc_wb, so the array is exact and the cheap clear is correct. */
-  else{ for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next)h->dirty=0; }
-#else
+  /* Clear the bits the barrier set, not every bit in the old heap. An object can
+     carry the bit with no entry naming it in exactly one case -- sp_gc_wb was
+     refused a slot -- and it sets sp_gc_rem_overflow when it is, so the overflow
+     branch covers precisely the state the array cannot describe. Same reasoning
+     in both builds.
+
+     This reads the array, so it needs the array consistent: see the note in
+     sp_gc_wb_slow on why no collection can observe it mid-update.
+
+     The threaded path walked the whole old list here instead, on every non-full
+     cycle -- O(live) per collection for work proportional to the stores. On a
+     server it was the largest phase of the stopped window (5.7s of 13.1s of
+     collector time, collector at 65% of wall; campfire from matz/spinel#4352). */
   else if(sp_gc_rem_overflow){
     for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next)h->dirty=0;
   }
   else{
     for(int ri=0;ri<sp_gc_nremembered;ri++)((sp_gc_hdr*)sp_gc_remembered[ri]-1)->dirty=0;
   }
-#endif
   sp_gc_nremembered=0; sp_gc_rem_overflow=0;
   /* Sweep the string heap only when IT is over its trigger: the sweep is a
      full walk of the live string list, and running it on every OBJECT-heap
