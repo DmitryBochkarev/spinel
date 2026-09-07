@@ -11970,7 +11970,11 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     for (int i = 0; i < argc; i++)
       if (nt_type(nt, argv[i]) && sp_streq(nt_type(nt, argv[i]), "SplatNode")) has_splat = 1;
     buf_printf(b, "({ sp_RbVal _t%d = ", tsv); emit_boxed(c, recv, b);
-    buf_puts(b, "; ");
+    /* The key list below allocates -- a PolyArray per splat, plus the copies
+       into it -- and the receiver is not read until after all of that. A
+       receiver that is a temporary (`poly(1).slice(*keys)`) was collected in
+       between and the slice answered from freed memory. */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tsv);
     int tkeys = -1;
     if (has_splat) {
       /* A splat contributes all of its elements, so the key list has a length

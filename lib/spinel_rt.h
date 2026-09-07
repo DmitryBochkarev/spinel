@@ -7170,7 +7170,8 @@ static sp_RbVal sp_poly_dig_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {
   return cur;
 }
 static sp_RbVal sp_poly_values_at_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {
-  sp_PolyArray *out = sp_PolyArray_new();
+  SP_GC_ROOT_RBVAL(recv);   /* read per key, and sp_poly_index_poly can allocate */
+  sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
   for (sp_int i = 0; i < n; i++) sp_PolyArray_push(out, sp_poly_index_poly(recv, keys[i]));
   return sp_box_poly_array(out);
 }
@@ -10255,6 +10256,11 @@ static sp_SymPolyHash *sp_poly_as_sym_hash(sp_RbVal v) {
 /* Hash#slice(*keys) on a boxed receiver: the sub-hash of the keys that are
    present, in the order given (#3449). */
 static sp_RbVal sp_poly_hash_slice(sp_RbVal v, int n, sp_RbVal *keys) {
+  /* The receiver is read once per key while the loop below allocates the
+     result and grows it, and it is a temporary whenever the call chains off
+     one (`poly(1).slice(*keys)`). Unrooted, it was collected part way through
+     and the remaining keys missed. */
+  SP_GC_ROOT_RBVAL(v);
   sp_PolyPolyHash *h = sp_PolyPolyHash_new();
   SP_GC_ROOT(h);
   for (int i = 0; i < n; i++)
@@ -10269,6 +10275,7 @@ static sp_RbVal sp_poly_hash_slice(sp_RbVal v, int n, sp_RbVal *keys) {
 static sp_RbVal sp_poly_kept_result(sp_RbVal orig, sp_PolyArray *kept) {
   if (!(orig.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(orig.cls_id)))
     return sp_box_poly_array(kept);
+  SP_GC_ROOT(kept);   /* walked below, across the hash allocation and its growth */
   sp_PolyPolyHash *h = sp_PolyPolyHash_new();
   SP_GC_ROOT(h);
   for (sp_int i = 0; kept && i < kept->len; i++) {
