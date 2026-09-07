@@ -245,30 +245,48 @@ specification:* `spin lock --update` and `--frozen` (CI mode).
 
 ### R6 — C in packages (implemented)
 
-- Carried C is discovered by extension: every `.c` in the package tree (outside
-  `build/`, `vendor/`, `test/`, and any path in `[package] exclude`) compiles into the shared cache
-  `$XDG_CACHE_HOME/spin/native/<package>-<version>-<cc>/` — never into the
+- Carried C is **declared**: `[package] sources` names the `.c` files, as paths
+  relative to the package root, globs allowed. They compile into the shared
+  cache `$XDG_CACHE_HOME/spin/native/<package>-<version>-<cc>/` — never into the
   package tree — and the objects reach the compiler via its repeatable
   `--link` flag; `spinel` itself never compiles package C. Objects rebuild when
-  any of the package's `.c`/`.h` is newer; the package tree and the compiler's
-  runtime headers are on the include path; `CC` selects the toolchain.
+  a declared `.c`, or any `.h` in the tree, is newer; the package tree and the
+  compiler's runtime headers are on the include path; `CC` selects the
+  toolchain. No `sources` key means the package carries no C.
 - The second shape, FFI to an external installed library, stays on the
   Ruby-side `ffi_lib`/`ffi_func` DSL (its SPINEL_LINK/SPINEL_CFLAGS markers
   already reach the link line). In-TU splicing of carried C is a possible
   future optimization behind the same declaration, not a third shape.
+- **`[package] sources`** (implemented; #4362) replaced discovery by presence.
+  The asymmetry it removes: **`.rb` entered the build by reachability
+  (`require`), `.c` entered by presence.** For a library that read as R2
+  working as intended — role by extension, nothing listed in the manifest —
+  but presence is not a declaration. A file the author never meant as a source
+  (a program of their own beside the Ruby, a scratch `.c` an agent left there)
+  was compiled anyway, and its `main()` collided with the generated one; the
+  diagnosis was a wall of multiple-definition lines naming symbols rather than
+  the file. Both halves of a package are declared now. Globs are allowed
+  because the author owns the consequence: `sources = ["*.c"]` is the old
+  behaviour, and it picks scratch files back up.
+  - A `.c` in the tree that no entry names is **reported**, not dropped
+    quietly, and so is an entry that matches nothing. A forgotten declaration
+    would otherwise arrive as an undefined symbol at link — the same "hard to
+    figure out why" with the sign flipped.
+  - The staleness scan follows: declared `.c` plus every `.h` in the tree,
+    since headers are reachable by inclusion rather than declared. A scratch
+    file nobody compiles no longer forces a rebuild.
+  - Migration, measured before the flip: six in-tree packages (they move with
+    the compiler), and of the external ones only spinel-bcrypt carries C — a
+    branch-tracked git dependency, so one push. pg, redis and spinel_kit, the
+    index-published packages, carry no `.c` at all.
 - **`[package] exclude`** (implemented; #4105) prunes globs, relative to the
-  package root, from carried-C discovery and from the staleness scan that
-  decides whether the cached objects are current. The asymmetry it answers:
-  **`.rb` enters the build by reachability (`require`), `.c` enters by
-  presence.** For a library that is R2 working as intended — role by
-  extension, nothing listed in the manifest. For an application whose
-  repository also holds a C program of its own, presence is wrong: its
-  `main()` collides with the generated one and the link fails, with no way to
-  say so. `.rb` needs no counterpart, since nothing compiles it unless
-  something requires it; an excluded `.h` stays on the include path, being
-  excluded from compilation rather than from inclusion. Globs are expanded at
-  manifest-read time into the same exact-path list `[[build]]` workdirs
-  already travel in, so naming a directory prunes its subtree.
+  package root, from what `sources` named and from the staleness scan that
+  decides whether the cached objects are current. With declaration it is no
+  longer the only way to keep a stray file out — it is what a glob needs, to
+  subtract from what it reached. An excluded `.h` stays on the include path,
+  being excluded from compilation rather than from inclusion. Globs are
+  expanded at manifest-read time into the same exact-path list `[[build]]`
+  workdirs already travel in, so naming a directory prunes its subtree.
 - **Spinel emits over its own output only** (implemented; #4362). `-c -o P`
   refuses when P exists and does not open with the compiler's banner, since
   emitting there replaces a source with a translation unit and nothing
@@ -276,8 +294,8 @@ specification:* `spin lock --update` and `--frozen` (CI mode).
   is gone. `--force` is the way through. This is the destructive half of
   the asymmetry; the rule below is the noisy half.
 - **Spinel's own output is not carried C** (implemented; #4362). A `.c` whose
-  first line is the compiler's banner is left out of discovery and named on
-  stderr. It defines `main` and, through the internal `spinel_rt.h`, a copy of
+  first line is the compiler's banner is left out even when a `sources` glob
+  reached it, and named on stderr. It defines `main` and, through the internal `spinel_rt.h`, a copy of
   the runtime's non-static surface, so compiling it collides with the generated
   TU on both -- and the collision reports symbols, never the file that brought
   them. The asymmetry above is what makes this reachable at all: one
