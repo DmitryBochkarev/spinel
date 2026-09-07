@@ -272,12 +272,14 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
   return (sp_int)pid;
 }
 
+/* The wait itself lives in the scheduler (sp_sched_wait_child): a blocking
+   waitpid answers for the OS worker, and a started green thread is pinned to
+   its worker, so blocking here stalls the thread that may have to drain this
+   child's output before it can exit (#4381). */
 sp_PolyArray *sp_process_waitpid2(sp_int pid) {
+  extern int sp_sched_wait_child(int pid, int *status);   /* see the note at the top on this TU's includes */
   int status = 0;
-  pid_t r;
-  do {
-    r = waitpid((pid_t)pid, &status, 0);
-  } while (r < 0 && errno == EINTR);
+  pid_t r = (pid_t)sp_sched_wait_child((int)pid, &status);
   if (r < 0) {
     if (errno == ECHILD) {
       sp_raise_cls("Errno::ECHILD", "No child processes");

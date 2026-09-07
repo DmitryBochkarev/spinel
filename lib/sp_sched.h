@@ -84,6 +84,8 @@ void       sp_Thread_pass(void);          /* Thread.pass: cooperative yield */
    green threads; a monitor thread wakes it after the duration. Falls back to a
    plain blocking sleep only in the single-threaded build (spinel_rt.h). */
 void       sp_sched_sleep(double seconds);
+int        sp_sched_other_threads_live(void);
+int        sp_sched_wait_child(int pid, int *status);
 void       sp_sleep(sp_float s);   /* Kernel#sleep; relocated from spinel_rt.h to lib/sp_cold.c */
 /* Scheduler-aware blocking I/O: park the calling green thread until `fd` is ready
    for `events` (POLLIN/POLLOUT), freeing its OS worker for other threads; the
