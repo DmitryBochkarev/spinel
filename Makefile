@@ -226,10 +226,25 @@ build/csrc/%.o: src/%.c $(SPINEL_HDRS) | build/csrc
 # The tmp name carries the PID: gate runs test/bench/optcarrot as parallel
 # sub-makes, each re-evaluating this FORCE target -- a shared tmp name races
 # (one job's rm strands the other's mv mid-flight).
+# SPINEL_RELEASE is the release this build belongs to, read from the nearest
+# tag: "2026.09.08" when HEAD is the release, "2026.09.08+12" when it is twelve
+# commits past it, "unreleased" before the first tag. The --match patterns ARE
+# the format rule -- a tag shaped any other way is not a release, and is
+# ignored here rather than breaking anyone's build. The revision stays the
+# FIRST field of `spinel --version`: it is what identifies a build (two builds
+# of one release share a name and differ here), and tools/spin.rb reads that
+# field for the toolchain key its probe records are stored under.
 build/csrc/spinel_rev.h: FORCE | build/csrc
 	@r=$$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown); \
+	d=$$(git describe --tags --match '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]' \
+	       --match '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]*' 2>/dev/null); \
+	case "$$d" in \
+	  "") d=unreleased ;; \
+	  *-*-g*) d="$${d%-*-g*}+$$(echo "$$d" | sed 's/.*-\([0-9][0-9]*\)-g[0-9a-f]*$$/\1/')" ;; \
+	esac; \
 	t=$@.tmp.$$$$; \
-	echo "#define SPINEL_BUILD_REV \"$$r\"" > $$t; \
+	{ echo "#define SPINEL_BUILD_REV \"$$r\""; \
+	  echo "#define SPINEL_RELEASE \"$$d\""; } > $$t; \
 	if cmp -s $$t $@; then rm -f $$t; else mv $$t $@; fi
 
 build/csrc/main.o: build/csrc/spinel_rev.h
