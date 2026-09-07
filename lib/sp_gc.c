@@ -422,15 +422,15 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
 
 /* Phase accounting (SPINEL_GC_PHASES=1). sp_gc_stat_seconds says how much time
    a collection cost; it never said which part of one, so "GC is half of wall"
-   gave no way to choose between the mark and the sweep. Every phase figure in
-   docs/internals/gc-threaded-pause-plan.md was measured by patching this file
-   by hand, three times over; these are the same measurements, kept.
+   gave no way to choose between the mark and the sweep. Each figure below had
+   been measured by patching this file by hand, more than once; this keeps the
+   measurement instead of redoing it.
 
    The remembered-set clear gets a bucket of its own rather than being folded
-   into a sweep: under SP_THREADS it walks the WHOLE old heap on every non-full
-   cycle, so on a large live set it is O(live) per collection, and nothing
-   attributed it. It is 8% of the stopped window on the threaded large-heap
-   shape in the plan doc. */
+   into a sweep, and earned it: the threaded clear used to walk the WHOLE old
+   heap on every non-full cycle, O(live) per collection, and nothing attributed
+   it -- 5.7s of 13.1s of collector time on a server workload, invisible in the
+   total. That is what this found, and #4380 then removed; it reads ~0 now. */
 double sp_gc_ph_mark = 0, sp_gc_ph_oldsweep = 0, sp_gc_ph_slotsweep = 0,
        sp_gc_ph_rembclear = 0, sp_gc_ph_strsweep = 0, sp_gc_ph_trim = 0;
 int sp_gc_ph_on = 0;
