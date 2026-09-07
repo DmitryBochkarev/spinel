@@ -1447,6 +1447,12 @@ sp_RbVal sp_Thread_tls_set(sp_thread *t, sp_sym k, sp_RbVal v) {
     m->vals = (sp_RbVal *)malloc(sizeof(sp_RbVal) * m->cap);
     if (!m->keys || !m->vals) sp_raise_cls("NoMemoryError", "failed to allocate thread storage");
     t->tls = m;
+    /* The map is a second reference store, into the THREAD, and the barrier
+       below covers only the map. sp_gc_alloc above is what makes this needed:
+       it can collect, which clears t's dirty bit, so a thread that was already
+       old holds a young map that nothing recorded and a minor mark never walks
+       it. The whole map went away and the next read answered nil. */
+    sp_gc_wb((void *)t);
   }
   if (m->len == m->cap) {
     sp_int nc = m->cap * 2;
