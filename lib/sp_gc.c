@@ -238,11 +238,26 @@ void sp_gc_wb_slow(void *obj) {
   sp_gc_hdr *h = (sp_gc_hdr *)obj - 1;
   if (!h->old || h->dirty) return;
   /* The bit goes up before the entry goes in, so between here and the push an
-     object carries it with nothing naming it. The collector's clear reads the
-     array and so depends on never observing that: nothing below allocates or
-     polls a safepoint, so a worker cannot park inside this function, and a
-     collection waits for every worker to park. Add an allocation or a poll
-     below and that clear has to go back to walking the old list. */
+     object carries it with nothing naming it, and the collector's clear reads
+     the array. Two things keep that safe, and the second is the one that
+     actually covers every case:
+
+     - No collection reaches this window from another thread. Nothing below
+       allocates or polls a safepoint, so a worker cannot park inside this
+       function, and a collection waits for every other worker to park.
+     - A collection that begins ON THIS THREAD, mid-window, is harmless because
+       the bit goes up FIRST. That collection leaves the bit set with no entry;
+       the push we are about to make lands in the next epoch's array, and the
+       clear after that finds it. It is self-healing, where pushing first would
+       not be. This is not hypothetical: an async `Signal.trap` handler runs
+       Ruby in signal context (sp_sig_c_handler -> sp_proc_call), on whatever
+       worker the OS picks, and the allocation it makes can collect right here
+       -- on a thread that does not park, because the collector never parks
+       itself. The single-threaded build has always cleared through the array
+       and has always had that same path.
+
+     Add an allocation or a safepoint poll below and the first argument goes;
+     reverse the two writes and the second one goes with it. */
   h->dirty = 1;
 #ifdef SP_THREADS
   /* Mutators run this concurrently, so the slot has to be claimed atomically:
