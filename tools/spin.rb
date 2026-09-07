@@ -6,9 +6,14 @@ require_relative "spin/toml"
 
 $spin_hasher = ""   # memoized content-hasher command (native_hasher)
 $spin_verbose = ENV["SPIN_VERBOSE"].to_s != ""   # --verbose / SPIN_VERBOSE=1
-# newline-packed paths of .c files collect_c recognised as spinel's own
+# newline-packed paths of .c files native_sources recognised as spinel's own
 # output and left out of the build; reported once per package (#4362)
 $spin_emitted_c = ""
+# newline-packed paths of .c files in the package tree that `sources` does not
+# name, and of `sources` entries that matched nothing; both are reported once
+# per package (#4362)
+$spin_undeclared_c = ""
+$spin_empty_source_glob = ""
                                                   # makes run_command print the
                                                   # command before exec'ing it
 
@@ -372,6 +377,12 @@ def path_excluded?(p2, excl)
   false
 end
 
+# Same exact compare against any newline-packed path list.
+def path_in_list?(p2, list)
+  list.split("\n").each { |x| return true if x != "" && p2 == x }
+  false
+end
+
 # A .c that spinel itself emitted is never carried C. It defines main(), and
 # through the internal spinel_rt.h it defines a copy of the runtime's
 # non-static surface too, so compiling it collides with the generated TU on
@@ -388,8 +399,10 @@ def spinel_emitted_c?(path)
   File.read(path, SPINEL_C_BANNER.length).to_s == SPINEL_C_BANNER
 end
 
-# newline-packed .c paths (an [] accumulator arg would go poly-array and
-# box the paths -- same tuple trap as dep_srcs)
+# newline-packed .c paths found by walking the tree (an [] accumulator arg would
+# go poly-array and box the paths -- same tuple trap as dep_srcs). This is no
+# longer what enters the build: it is the census `native_sources` reports
+# against, so a `.c` nobody declared is named rather than silently ignored.
 def collect_c(dir, excl)
   out = ""
   Dir.children(dir).each do |e|
@@ -400,16 +413,70 @@ def collect_c(dir, excl)
     if File.directory?(p2)
       out += collect_c(p2, excl)
     elsif e.end_with?(".c")
+      out += p2 + "\n"
+    end
+  end
+  out
+end
+
+# What a package compiles is what its manifest names:
+#
+#     [package]
+#     sources = ["sp_json.c"]      # or ["*.c"], or ["native/*.c"]
+#
+# `.c` used to enter the build by PRESENCE while `.rb` entered by
+# require-reachability, and that asymmetry is what #4362 was about: a file the
+# author never meant as a source -- spinel's own output, or a scratch program an
+# agent left beside the sources -- was compiled anyway, and the diagnosis was a
+# multiple-definition wall that named symbols rather than the file. Now both
+# halves of a package are declared: `.rb` by being required, `.c` by being
+# listed. No `sources` key means the package carries no C.
+#
+# Globs are allowed and expanded here, so `path_excluded?` and the undeclared
+# census below stay exact compares. `*.c` is deliberately expressible: it is the
+# old behaviour, minus spinel's own output, which the banner check still removes
+# whether or not a glob matched it -- an allow-list cannot recognise a generated
+# file that landed under a name the author declared.
+def native_sources(dir, excl)
+  mf = File.join(dir, "spin.toml")
+  return "" unless File.exist?(mf)
+  toml = TomlDoc.parse(File.read(mf))
+  out = ""
+  toml.get_array("package", "sources").split("\n").each do |g|
+    next if g == ""
+    hits = 0
+    Dir.glob(File.join(dir, g)).each do |p2|
+      next if File.directory?(p2)
+      next unless p2.end_with?(".c")
+      next if path_excluded?(p2, excl)
+      hits += 1
       if spinel_emitted_c?(p2)
         $spin_emitted_c += p2 + "\n"
       else
         out += p2 + "\n"
       end
     end
+    $spin_empty_source_glob += g + "\n" if hits == 0
+  end
+  # Everything else in the tree is named rather than dropped in silence. The
+  # banner check runs here too: an emitted file needs its own message whether or
+  # not a glob happened to reach it, because it may be sitting on top of the
+  # source it overwrote and "not declared" would be the wrong thing to say.
+  collect_c(dir, excl).split("\n").each do |c|
+    next if c == ""
+    next if path_in_list?(c, out) || path_in_list?(c, $spin_emitted_c)
+    if spinel_emitted_c?(c)
+      $spin_emitted_c += c + "\n"
+    else
+      $spin_undeclared_c += c + "\n"
+    end
   end
   out
 end
 
+# Headers are reachable by inclusion rather than declared, so the staleness
+# scan still walks the tree for `.h`. The `.c` side is the declared list, folded
+# in by the caller: a scratch file nobody compiles must not force a rebuild.
 def newest_native_input(dir, newest, excl)
   Dir.children(dir).each do |e|
     next if e.start_with?(".")
@@ -418,7 +485,7 @@ def newest_native_input(dir, newest, excl)
     next if path_excluded?(p2, excl)
     if File.directory?(p2)
       newest = newest_native_input(p2, newest, excl)
-    elsif e.end_with?(".c") || e.end_with?(".h")
+    elsif e.end_with?(".h")
       m = File.mtime(p2).to_i
       newest = m if m > newest
     end
@@ -469,13 +536,28 @@ end
 def native_objs_for(name, dir, version)
   excl = native_excludes(dir)
   $spin_emitted_c = ""
-  cs = collect_c(dir, excl)
+  $spin_undeclared_c = ""
+  $spin_empty_source_glob = ""
+  cs = native_sources(dir, excl)
   $spin_emitted_c.split("\n").each do |g|
     next if g == ""
     rel = g[dir.length + 1..-1].to_s
     $stderr.puts "spin: " + name + "/" + rel + " is spinel's own output and was NOT compiled."
     $stderr.puts "spin:   delete it, or move it out of the package tree. If it overwrote a"
     $stderr.puts "spin:   source of the same name, restore that source: it is gone."
+  end
+  # A forgotten declaration would otherwise surface as an undefined symbol at
+  # link, which is the same "very difficult to figure out why" this change is
+  # meant to remove, with the sign flipped. Say it here, where the file is
+  # still in hand.
+  $spin_undeclared_c.split("\n").each do |g|
+    next if g == ""
+    rel = g[dir.length + 1..-1].to_s
+    $stderr.puts "spin: " + name + "/" + rel + " is not named by [package] sources and was NOT compiled."
+  end
+  $spin_empty_source_glob.split("\n").each do |g|
+    next if g == ""
+    $stderr.puts "spin: " + name + ": [package] sources entry \"" + g + "\" matched no .c file."
   end
   return [] if cs == ""
   # The cache key names a DIRECTORY, so the compiler part of it has to be
@@ -485,6 +567,11 @@ def native_objs_for(name, dir, version)
   odir = native_cache_dir(name + "-" + version + "-" + cc_cache_key)
   hdr = spinel_hdr_dir
   hnew = newest_native_input(dir, 0, excl)
+  cs.split("\n").each do |c|
+    next if c == ""
+    m = File.mtime(c).to_i
+    hnew = m if m > hnew
+  end
   objs = []
   cs.split("\n").each do |c|
     rel = c[dir.length + 1..-1].to_s

@@ -137,7 +137,7 @@ rm -f test/gc*.rb
 # --- carried native C (M2): package .c compiled to the shared cache, --link'ed ------
 cd "$WORK"
 mkdir -p spinel-fast
-printf '[package]\nname = "fast"\n' > spinel-fast/spin.toml
+printf '[package]\nname = "fast"\nsources = ["*.c"]\n' > spinel-fast/spin.toml
 cat > spinel-fast/fast.rb <<'EOF'
 module Fast
   ffi_func :fast_quad, [:int], :int
@@ -595,10 +595,13 @@ SPINEL_BIN=$(dirname "$SPIN")/spinel
 expect "spin flags: hand-driven build matches spin build" \
   "$("$SPIN" run 2>&1 | tail -1)" "$("$WORK/handoff" 2>&1 | tail -1)"
 
-# --- `[package] exclude`: C the package says is not part of this build --------
-# `.rb` enters by require, `.c` by presence, so an application whose repository
-# also holds a C program of its own has no other way to keep it out. Without
-# the field its main() collides with the generated one and the link fails.
+# --- carried C is declared, not discovered (#4362) -----------------------------
+# `.rb` enters by require-reachability and `.c` used to enter by presence, so an
+# application whose repository also holds a C program of its own -- or a scratch
+# file an agent left beside the sources -- had its main() compiled into the
+# build and collided with the generated one. Nothing is compiled now unless
+# [package] sources names it, and what was skipped is reported rather than
+# silently dropped.
 cd "$WORK"
 mkdir -p excl/bin
 printf 'puts "excluded ok"\n' > excl/bin/excl.rb
@@ -610,9 +613,33 @@ mkdir -p excl/cbits
 printf 'int cbits_unused(void) { return 7; }\n' > excl/cbits/helper.c
 cd excl
 printf '[package]\nname = "excl"\n' > spin.toml
-"$SPIN" build >/dev/null 2>&1 && fail "exclude: a main()-bearing .c linked in without complaint"
-printf '[package]\nname = "excl"\nexclude = ["standalone.c", "cbits"]\n' > spin.toml
-expect "exclude: named file and directory both pruned" "excluded ok" "$("$SPIN" run 2>&1 | tail -1)"
+OUT=$("$SPIN" run 2>&1) || fail "sources: an undeclared main()-bearing .c broke the build"
+expect "sources: nothing is carried without a declaration" "excluded ok" "$(echo "$OUT" | tail -1)"
+echo "$OUT" | grep -q "standalone.c is not named by \[package\] sources" ||
+  fail "sources: the undeclared .c was dropped without saying so"
+echo "$OUT" | grep -q "cbits/helper.c is not named by \[package\] sources" ||
+  fail "sources: the undeclared .c in a subdirectory was not reported"
+
+# A glob is allowed -- it is the old behaviour, and the author owns it. What it
+# picks up beyond the sources is `exclude`'s job: that field now subtracts from
+# what `sources` named rather than from everything present.
+printf '[package]\nname = "excl"\nsources = ["*.c", "cbits/*.c"]\nexclude = ["standalone.c"]\n' > spin.toml
+OUT=$("$SPIN" run 2>&1) || fail "exclude: subtracting from a glob did not build"
+expect "exclude: subtracts from what sources named" "excluded ok" "$(echo "$OUT" | tail -1)"
+echo "$OUT" | grep -q "^cc excl/cbits/helper.c$" || fail "sources: the declared .c was not compiled"
+
+# Without the subtraction the scratch program is a declared source again, and
+# its main() collides with the generated one exactly as it used to.
+printf '[package]\nname = "excl"\nsources = ["*.c", "cbits/*.c"]\n' > spin.toml
+"$SPIN" build >/dev/null 2>&1 && fail "sources: a declared main()-bearing .c linked in without complaint"
+
+# A declaration that matches nothing is a typo, and the link error it turns into
+# names a symbol rather than the manifest. Say it here.
+printf '[package]\nname = "excl"\nsources = ["nosuch/*.c"]\n' > spin.toml
+"$SPIN" clean >/dev/null 2>&1
+OUT=$("$SPIN" run 2>&1)
+echo "$OUT" | grep -q 'sources entry "nosuch/\*.c" matched no .c file' ||
+  fail "sources: a glob matching nothing was not reported"
 
 # --- emitting C over a source spinel did not write is refused (#4362) ---------
 # The destructive half of the same problem: `spinel app.rb -c -o sp_json.c`
@@ -642,7 +669,7 @@ esac
 # on stderr, since it may be sitting on top of a source it overwrote.
 cd "$WORK"
 mkdir -p emitted/bin
-printf '[package]\nname = "emitted"\n' > emitted/spin.toml
+printf '[package]\nname = "emitted"\nsources = ["real.c"]\n' > emitted/spin.toml
 printf 'puts "emitted ok"\n' > emitted/bin/emitted.rb
 cat > emitted/real.c <<'EOF'
 #include "spinel/runtime.h"
@@ -666,7 +693,7 @@ expect "emitted C: the build still runs" "emitted ok" "$("$SPIN" run 2>&1 | tail
 # cache mirrors the tree instead, where a directory cannot collide with a file.
 cd "$WORK"
 mkdir -p spinel-ocol/a ocolapp/bin
-printf '[package]\nname = "ocol"\n' > spinel-ocol/spin.toml
+printf '[package]\nname = "ocol"\nsources = ["a_util.c", "a/util.c"]\n' > spinel-ocol/spin.toml
 cat > spinel-ocol/ocol.rb <<'EOF'
 module Ocol
   native_lib "ocol"
@@ -717,7 +744,7 @@ esac
 # the runtime include path, and a check written against it passes either way.
 cd "$WORK"
 mkdir -p spinel-rthdr linked/bin
-printf '[package]\nname = "rthdr"\n' > spinel-rthdr/spin.toml
+printf '[package]\nname = "rthdr"\nsources = ["sp_rthdr.c"]\n' > spinel-rthdr/spin.toml
 cat > spinel-rthdr/rthdr.rb <<'EOF'
 module Rthdr
   native_lib "rthdr"

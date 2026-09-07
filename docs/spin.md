@@ -196,38 +196,67 @@ end
 intptr_t fast_quad(intptr_t x) { return x * 4; }
 ```
 
-`spin` compiles each `.c` once into a shared cache keyed by
+The C a package carries is the C its manifest names:
+
+```toml
+[package]
+name = "fast"
+sources = ["fast_ext.c"]
+```
+
+`spin` compiles each named `.c` once into a shared cache keyed by
 (package, version, toolchain) — set `CC` to choose the compiler — and links the
 objects into every dependent build. External libraries use the existing
 `ffi_lib` declaration and need no manifest entry.
 
-### Excluding C from the build
+### Declaring the C a package carries
 
-`.rb` enters the build by being required; `.c` enters by being there. That is
-what lets a package carry native code without listing it, and it is the wrong
-default when a repository holds a C program of its own — a `main()` beside the
-Ruby will collide with the generated one at link time. `exclude` names what is
-not part of this build:
+Both halves of a package are declared. A `.rb` enters the build by being
+required; a `.c` enters by being listed in `sources`. Without the key a package
+carries no C at all, so a program of your own sitting beside the Ruby — or a
+scratch file left there while debugging — is not compiled and cannot collide
+with the generated `main` at link time.
+
+Entries are paths relative to the package root and may be globs:
+
+```toml
+sources = ["native/*.c", "vendor/lib/**/*.c"]
+```
+
+`sources = ["*.c"]` is allowed and means what carrying C used to mean: compile
+whatever `.c` is there. It is the author's call, and it picks scratch files back
+up.
+
+A `.c` in the tree that no entry names is reported and skipped, rather than
+skipped quietly — a forgotten entry would otherwise surface as an undefined
+symbol at link, which names a symbol instead of the file. An entry that matches
+nothing is reported for the same reason.
+
+One kind of `.c` is never compiled however it is declared: a file spinel itself
+emitted. `spinel app.rb -c -o out.c` writes a translation unit that defines
+`main` and, through the compiler's internal header, its own copy of the runtime,
+so compiling it as carried C collides with the real program on both. spin
+recognises its own output by the banner on the first line, leaves it out even
+when a glob reached it, and says which file it left out — that file may be
+sitting on top of a source of the same name it overwrote, in which case the
+source is gone and needs restoring.
+
+### Excluding C the declaration reached
+
+`exclude` subtracts from what `sources` named, which is what a glob needs:
 
 ```toml
 [package]
 name = "myapp"
-exclude = ["standalone_c_app.c", "c_lib*.c", "cbits"]
+sources = ["*.c"]
+exclude = ["standalone_c_app.c", "cbits"]
 ```
 
 Globs are relative to the package root; naming a directory prunes all of it.
-One kind of `.c` needs no entry: a file spinel itself emitted. `spinel app.rb
--c -o out.c` writes a translation unit that defines `main` and, through the
-compiler's internal header, its own copy of the runtime, so compiling it as
-carried C collides with the real program on both. spin recognises its own
-output by the banner on the first line, leaves it out of the build, and says
-which file it left out — that file may be sitting on top of a source of the
-same name it overwrote, in which case the source is gone and needs restoring.
-
-`exclude` covers native discovery only — `.rb` needs no entry, since nothing
+`exclude` covers native sources only — `.rb` needs no entry, since nothing
 compiles it unless something requires it, and an excluded `.h` is still on the
 include path for the C that is compiled. An application scaffolded by
-`spin new` has no `[package]` table; add one to use the field.
+`spin new` has no `[package]` table; add one to use either field.
 
 ## Choosing an allocator
 
