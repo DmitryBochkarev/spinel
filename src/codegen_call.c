@@ -1573,13 +1573,38 @@ static int node_has_call(const NodeTable *nt, int node) {
    (`ary.push(x) == ary[0]`) gcc's right-first order read stale state (#3148).
    Hoist recv to a boxed temp only when BOTH operands may have side effects --
    otherwise there is no interdependency and the extra temp is pure churn. */
+/* `sp_str_eq(A, B)` leaves its two operands unsequenced, and either of them
+   can be a FRESH string held by nothing but that argument slot -- an
+   interpolation, a #upcase, a #+ . Whichever the C compiler evaluates second
+   allocates, and under a collection there the first operand is swept while the
+   comparison is still to come, so the answer is whatever the freed bytes read
+   as. Bind the receiver to a rooted temp first, and only when both sides can
+   allocate: a variable or a literal receiver is already held, and the extra
+   temp would be churn in every string comparison in the program. Same shape as
+   the operand rule #4049 settled for call arguments. */
+static void emit_str_eq_ordered(Compiler *c, int recv, int arg, int eq, Buf *b) {
+  if (subtree_may_allocate(c->nt, recv) && subtree_may_allocate(c->nt, arg)) {
+    int t = ++g_tmp;
+    buf_printf(b, eq ? "({ const char *_t%d = " : "(!({ const char *_t%d = ", t);
+    emit_expr(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT(_t%d); sp_str_eq(_t%d, ", t, t);
+    emit_expr(c, arg, b);
+    buf_puts(b, "); })");
+    if (!eq) buf_puts(b, ")");
+    return;
+  }
+  buf_puts(b, eq ? "sp_str_eq(" : "(!sp_str_eq(");
+  emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, arg, b);
+  buf_puts(b, eq ? ")" : "))");
+}
 static void emit_poly_eq_ordered(Compiler *c, int recv, int arg, int eq, Buf *b) {
   int order = node_has_call(c->nt, recv) && node_has_call(c->nt, arg);
   buf_puts(b, eq ? "" : "(!");
   if (order) {
     int t = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_boxed(c, recv, b);
-    buf_printf(b, "; sp_poly_eq(_t%d, ", t); emit_boxed(c, arg, b); buf_puts(b, "); })");
+    /* the arg below can allocate, and the hoisted receiver is held by nothing else */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_eq(_t%d, ", t, t); emit_boxed(c, arg, b); buf_puts(b, "); })");
   }
   else {
     buf_puts(b, "sp_poly_eq("); emit_boxed(c, recv, b); buf_puts(b, ", ");
@@ -8537,7 +8562,7 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
        equality; all three fall through to their dedicated cover handlers. */
     if (fr && fr != 5 && fr != 6 && fr != 7 && fa && fa != 5 && fa != 6 && fa != 7) {
       if (fr == fa) {
-        if (fr == 2) { buf_puts(b, "sp_str_eq("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+        if (fr == 2) emit_str_eq_ordered(c, recv, argv[0], 1, b);
         else { buf_puts(b, "("); emit_expr(c, recv, b); buf_puts(b, " == "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       }
       else { buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, "), ("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); }
@@ -8799,7 +8824,7 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
       /* same comparable family: compare by value */
       if (fr && fa && fr == fa) {
         if (fr == 2 && emit_strchar_cmp(c, recv, argv[0], eq, b)) return 1;
-        if (fr == 2) { buf_puts(b, eq ? "sp_str_eq(" : "(!sp_str_eq("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, eq ? ")" : "))"); }
+        if (fr == 2) emit_str_eq_ordered(c, recv, argv[0], eq, b);
         else if (fr == 5) { buf_puts(b, eq ? "sp_range_eq(" : "(!sp_range_eq("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, eq ? ")" : "))"); }
         else if (fr == 6) { buf_puts(b, eq ? "sp_frange_eq(" : "(!sp_frange_eq("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, eq ? ")" : "))"); }
         else if (fr == 7) { buf_puts(b, eq ? "sp_srange_eq(" : "(!sp_srange_eq("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, eq ? ")" : "))"); }
