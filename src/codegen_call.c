@@ -28713,7 +28713,10 @@ else {
     }
     if ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) && argc == 1) {
       int t = ++g_tmp;
-      buf_printf(b, "({ sp_Bigint *_t%d = ", t); emit_bigint_operand(c, argv[0], b); buf_puts(b, "; ");
+      buf_printf(b, "({ sp_Bigint *_t%d = ", t); emit_bigint_operand(c, argv[0], b);
+      /* the receiver expression below is unsequenced with this operand and can
+         allocate; no reproducer, the rule (#4049) is the reason */
+      buf_printf(b, "; SP_GC_ROOT(_t%d); ", t);
       if (sp_streq(name, "allbits?"))
         buf_printf(b, "(sp_bigint_cmp(sp_bigint_and(%s, _t%d), _t%d) == 0); })", r, t, t);
       else if (sp_streq(name, "anybits?"))
@@ -28724,12 +28727,15 @@ else {
     }
     if (sp_streq(name, "gcdlcm") && argc == 1) {
       int t = ++g_tmp, ta = ++g_tmp, tr = ++g_tmp;
-      buf_printf(b, "({ sp_Bigint *_t%d = %s; sp_Bigint *_t%d = ", tr, r, t);
+      buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_Bigint *_t%d = ", tr, r, tr, t);
       emit_bigint_operand(c, argv[0], b);
-      buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
+      /* both operands are read after the array allocation below, and both are
+         fresh bigints held by nothing else: unrooted they were swept and the
+         pair came back as [0, 0]. The gcd arm above already roots its two. */
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_gcd(_t%d, _t%d)));"
                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_lcm(_t%d, _t%d))); _t%d; })",
-                 ta, ta, ta, tr, t, ta, tr, t, ta);
+                 t, ta, ta, ta, tr, t, ta, tr, t, ta);
       free(rs.p); return;
     }
     /* to_r / rationalize on a Bignum -> Rational(self, 1); quo -> Rational(self,

@@ -8761,6 +8761,36 @@ static void setter_value_close(Compiler *c, int id, TyKind vt, Buf *b, int tv) {
   buf_puts(b, "; })");
 }
 
+/* sp_obj_clamp takes three boxed operands, and each of them can be a fresh
+   allocation: `Ver.new(12).clamp(Ver.new(1)..Ver.new(9))` allocates all three.
+   C leaves the evaluations unsequenced, so whichever runs first is held by
+   nothing while the others allocate, and a collection there took it -- the
+   user `<=>` then ran against freed memory and clamp answered the receiver
+   unchanged. Bind the operands to rooted temps in order, and only when more
+   than one of them can allocate: a lone allocating operand has nothing to
+   outlive. Same rule as #4049. A -1 side is an absent range endpoint, which
+   sp_obj_clamp skips as nil. */
+static void emit_obj_clamp3(Compiler *c, int recv, int lo, int hi, Buf *b) {
+  int na = (recv >= 0 && subtree_may_allocate(c->nt, recv))
+         + (lo >= 0 && subtree_may_allocate(c->nt, lo))
+         + (hi >= 0 && subtree_may_allocate(c->nt, hi));
+  if (na < 2) {
+    buf_puts(b, "sp_obj_clamp(");
+    emit_boxed(c, recv, b); buf_puts(b, ", ");
+    if (lo >= 0) emit_boxed(c, lo, b); else buf_puts(b, "sp_box_nil()");
+    buf_puts(b, ", ");
+    if (hi >= 0) emit_boxed(c, hi, b); else buf_puts(b, "sp_box_nil()");
+    buf_puts(b, ")");
+    return;
+  }
+  int t1 = ++g_tmp, t2 = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = ", t1); emit_boxed(c, recv, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", t1, t2);
+  if (lo >= 0) emit_boxed(c, lo, b); else buf_puts(b, "sp_box_nil()");
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_obj_clamp(_t%d, _t%d, ", t2, t1, t2);
+  if (hi >= 0) emit_boxed(c, hi, b); else buf_puts(b, "sp_box_nil()");
+  buf_puts(b, "); })");
+}
 int emit_object_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -9024,11 +9054,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
     if (same_cls && comp_ty_value_obj(c, rt))
       buf_printf(b, "(*(sp_%s *)", c->classes[ty_object_class(rt)].c_name);
     else if (same_cls) { buf_puts(b, "(("); emit_ctype(c, rt, b); buf_puts(b, ")"); }
-    buf_puts(b, "sp_obj_clamp(");
-    emit_boxed(c, recv, b); buf_puts(b, ", ");
-    emit_boxed(c, argv[0], b); buf_puts(b, ", ");
-    emit_boxed(c, argv[1], b);
-    buf_puts(b, ")");
+    emit_obj_clamp3(c, recv, argv[0], argv[1], b);
     if (same_cls) buf_puts(b, ".v.p)");
     return 1;
   }
@@ -9069,12 +9095,8 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
         if (comp_ty_value_obj(c, rt))
           buf_printf(b, "(*(sp_%s *)", c->classes[ty_object_class(rt)].c_name);
         else { buf_puts(b, "(("); emit_ctype(c, rt, b); buf_puts(b, ")"); }
-        buf_puts(b, "sp_obj_clamp(");
-        emit_boxed(c, recv, b); buf_puts(b, ", ");
-        if (lo_obj) emit_boxed(c, rlo, b); else buf_puts(b, "sp_box_nil()");
-        buf_puts(b, ", ");
-        if (hi_obj) emit_boxed(c, rhi, b); else buf_puts(b, "sp_box_nil()");
-        buf_puts(b, ").v.p)");
+        emit_obj_clamp3(c, recv, lo_obj ? rlo : -1, hi_obj ? rhi : -1, b);
+        buf_puts(b, ".v.p)");
         return 1;
       }
     }
