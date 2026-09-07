@@ -786,6 +786,7 @@ reject-test: $(SPINEL)
 # ran when a store into a capture cell shipped with no barrier at all, so a
 # fix here adds its reproducer to the list rather than testing by hand.
 GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
+                  test/gc_minor_thread_retval.rb \
                   test/proc_cell_capture_marked.rb
 
 gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
