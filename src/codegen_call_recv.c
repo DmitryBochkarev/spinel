@@ -3015,7 +3015,7 @@ else {
             int trj = ++g_tmp;
             buf_printf(b, " sp_IntArray *_t%d = ({ sp_Range _t%d = ", tb[j], trj);
             emit_expr(c, argv[j], b);
-            buf_printf(b, "; sp_range_to_ia(_t%d); });", trj);
+            buf_printf(b, "; sp_range_to_ia(_t%d); }); SP_GC_ROOT(_t%d);", trj, tb[j]);
             at[j] = TY_INT_ARRAY;
             continue;
           }
@@ -4485,7 +4485,7 @@ else {
             int trj = ++g_tmp;
             buf_printf(b, " sp_IntArray *_t%d = ({ sp_Range _t%d = ", tb[j], trj);
             emit_expr(c, argv[j], b);
-            buf_printf(b, "; sp_range_to_ia(_t%d); });", trj);
+            buf_printf(b, "; sp_range_to_ia(_t%d); }); SP_GC_ROOT(_t%d);", trj, tb[j]);
             at[j] = TY_INT_ARRAY;
             continue;
           }
