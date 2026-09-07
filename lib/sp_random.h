@@ -25,7 +25,9 @@ sp_float sp_krand_float(void);           /* uniform [0, 1) */
    stream from its seed. The default instance is a window onto the shared
    Kernel stream, so srand() governs it too. */
 typedef struct { uint64_t state; sp_int seed; } sp_Random;
-extern SP_TLS sp_Random sp_random_default;
+/* The default instance is private to sp_random.c: it is a guarded static
+   there (see the comment on its box) and is reached only through
+   sp_random_default_get below. */
 uint64_t sp_random_next(sp_Random *r);
 sp_Random *sp_Random_new(sp_int seed);
 sp_Random *sp_Random_new_float(sp_float f);

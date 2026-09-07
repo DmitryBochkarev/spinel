@@ -73,7 +73,18 @@ sp_float sp_krand_float(void) {
 
 /* ---- Random instance methods ---- */
 
-SP_TLS sp_Random sp_random_default;
+/* The default stream is a static, not a GC allocation -- but the class-method
+   forms (`Random.bytes`, `Random.rand`) hand it to the same entry points an
+   instance uses, and those root their receiver, which puts a .bss address on
+   the mark path. Lay a 0xfd skip byte directly before it so sp_gc_mark's
+   tag-byte protocol bails out instead of reading whatever precedes it as a GC
+   header: under SPINEL_GC_STRESS=1 that read reached a bogus scan hook and
+   crashed inside the mark walk. Same shape, and the same reason, as the root
+   fiber in sp_fiber.c: the guard array is exactly one alignment unit, so its
+   last byte always directly precedes the struct with no padding in between. */
+static SP_TLS struct { char guard[_Alignof(sp_Random)]; sp_Random r; } sp_random_default_box
+    = { .guard = { [_Alignof(sp_Random) - 1] = (char)0xfd } };
+#define sp_random_default (sp_random_default_box.r)
 uint64_t sp_random_next(sp_Random *r) {SP_GC_ROOT(r);
   if (r == &sp_random_default) return sp_krand_next();
   uint64_t hi = sp_pcg32_adv(&r->state);
