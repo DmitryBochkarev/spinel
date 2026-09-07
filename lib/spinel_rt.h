@@ -5516,6 +5516,12 @@ static const char *sp_PolyArray_join(sp_PolyArray *a, const char *sep) {
 /* join on a boxed array (poly value holding any array kind) */
 static const char *sp_poly_join(sp_RbVal a, const char *sep) {
   if (a.tag != SP_TAG_OBJ) return sp_poly_to_s(a);
+  /* Rooted the way sp_PolyArray_join below already roots its own pair: every
+     arm here allocates -- the int arm builds a string and converts a number
+     per element -- and the array is reachable only through this boxed
+     parameter, so a collection freed it and the walk read `ar->data` out of
+     memory the sweep had taken. */
+  SP_GC_ROOT_RBVAL(a); SP_GC_ROOT(sep);
   /* `.join` on a poly value is Array#join here, but a Thread carried in a poly
      slot (e.g. `threads.each(&:join)`, where the thread array boxed to poly)
      means Thread#join: run it to completion. Its result (the thread) is almost
