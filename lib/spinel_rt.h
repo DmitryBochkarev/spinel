@@ -2161,15 +2161,22 @@ static inline sp_int sp_int_c_mul(sp_int x, sp_int y) { return x * y; }
 static inline int sp_poly_is_brat(sp_RbVal v) { return v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL; }
 static void sp_poly_to_brat(sp_RbVal v, sp_Bigint **num, sp_Bigint **den) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_BIG_RATIONAL) { sp_BigRational *r = (sp_BigRational *)v.v.p; *num = r->num; *den = r->den; return; }
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RATIONAL) { sp_Rational *r = (sp_Rational *)v.v.p; *num = sp_bigint_new_int(r->num); *den = sp_bigint_new_int(r->den); return; }
-  if (v.tag == SP_TAG_BIGINT) { *num = (sp_Bigint *)v.v.p; *den = sp_bigint_new_int(1); return; }
-  *num = sp_bigint_new_int(v.tag == SP_TAG_INT ? v.v.i : 0); *den = sp_bigint_new_int(1);
+  /* the denominator's allocation can collect the numerator written just
+     above it, which nothing holds yet -- the caller's slot is the root */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RATIONAL) { sp_Rational *r = (sp_Rational *)v.v.p; *num = sp_bigint_new_int(r->num); SP_GC_ROOT(*num); *den = sp_bigint_new_int(r->den); return; }
+  if (v.tag == SP_TAG_BIGINT) { *num = (sp_Bigint *)v.v.p; SP_GC_ROOT(*num); *den = sp_bigint_new_int(1); return; }
+  *num = sp_bigint_new_int(v.tag == SP_TAG_INT ? v.v.i : 0); SP_GC_ROOT(*num); *den = sp_bigint_new_int(1);
 }
-static sp_RbVal sp_brat_add_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); sp_poly_to_brat(b,&bn,&bd); return sp_box_brat(sp_bigint_add(sp_bigint_mul(an,bd), sp_bigint_mul(bn,ad)), sp_bigint_mul(ad,bd)); }
-static sp_RbVal sp_brat_sub_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); sp_poly_to_brat(b,&bn,&bd); return sp_box_brat(sp_bigint_sub(sp_bigint_mul(an,bd), sp_bigint_mul(bn,ad)), sp_bigint_mul(ad,bd)); }
-static sp_RbVal sp_brat_mul_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); sp_poly_to_brat(b,&bn,&bd); return sp_box_brat(sp_bigint_mul(an,bn), sp_bigint_mul(ad,bd)); }
-static sp_RbVal sp_brat_div_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); sp_poly_to_brat(b,&bn,&bd); if (sp_bigint_sign(bn) == 0) sp_raise_cls("ZeroDivisionError", "divided by 0"); return sp_box_brat(sp_bigint_mul(an,bd), sp_bigint_mul(ad,bn)); }
-static int sp_brat_cmp_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); sp_poly_to_brat(b,&bn,&bd); return sp_bigint_cmp(sp_bigint_mul(an,bd), sp_bigint_mul(bn,ad)); }
+/* Every intermediate here is a fresh Bigint and every helper below
+   allocates, so an unrooted one is collected by the next call in the
+   same expression: a big Rational read back as (0/0), and the arithmetic
+   segfaulted under SPINEL_GC_STRESS=1. Each operand is rooted as it is
+   read and each product before the next allocation. */
+static sp_RbVal sp_brat_add_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); SP_GC_ROOT(an); SP_GC_ROOT(ad); sp_poly_to_brat(b,&bn,&bd); SP_GC_ROOT(bn); SP_GC_ROOT(bd); sp_Bigint *l = sp_bigint_mul(an,bd); SP_GC_ROOT(l); sp_Bigint *r = sp_bigint_mul(bn,ad); SP_GC_ROOT(r); sp_Bigint *num = sp_bigint_add(l,r); SP_GC_ROOT(num); return sp_box_brat(num, sp_bigint_mul(ad,bd)); }
+static sp_RbVal sp_brat_sub_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); SP_GC_ROOT(an); SP_GC_ROOT(ad); sp_poly_to_brat(b,&bn,&bd); SP_GC_ROOT(bn); SP_GC_ROOT(bd); sp_Bigint *l = sp_bigint_mul(an,bd); SP_GC_ROOT(l); sp_Bigint *r = sp_bigint_mul(bn,ad); SP_GC_ROOT(r); sp_Bigint *num = sp_bigint_sub(l,r); SP_GC_ROOT(num); return sp_box_brat(num, sp_bigint_mul(ad,bd)); }
+static sp_RbVal sp_brat_mul_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); SP_GC_ROOT(an); SP_GC_ROOT(ad); sp_poly_to_brat(b,&bn,&bd); SP_GC_ROOT(bn); SP_GC_ROOT(bd); sp_Bigint *num = sp_bigint_mul(an,bn); SP_GC_ROOT(num); return sp_box_brat(num, sp_bigint_mul(ad,bd)); }
+static sp_RbVal sp_brat_div_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); SP_GC_ROOT(an); SP_GC_ROOT(ad); sp_poly_to_brat(b,&bn,&bd); SP_GC_ROOT(bn); SP_GC_ROOT(bd); if (sp_bigint_sign(bn) == 0) sp_raise_cls("ZeroDivisionError", "divided by 0"); sp_Bigint *num = sp_bigint_mul(an,bd); SP_GC_ROOT(num); return sp_box_brat(num, sp_bigint_mul(ad,bn)); }
+static int sp_brat_cmp_poly(sp_RbVal a, sp_RbVal b) { sp_Bigint *an,*ad,*bn,*bd; sp_poly_to_brat(a,&an,&ad); SP_GC_ROOT(an); SP_GC_ROOT(ad); sp_poly_to_brat(b,&bn,&bd); SP_GC_ROOT(bn); SP_GC_ROOT(bd); sp_Bigint *l = sp_bigint_mul(an,bd); SP_GC_ROOT(l); return sp_bigint_cmp(l, sp_bigint_mul(bn,ad)); }
 /* A failed boxed arithmetic dispatch must not manufacture Integer zero. Ruby
    distinguishes receivers with no such method from methods that reject the
    operand, so preserve that distinction at the dynamic fallback. */

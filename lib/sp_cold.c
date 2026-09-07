@@ -3571,15 +3571,26 @@ void sp_brat_scan(void *p) {
    divide out the gcd. den must be non-zero (callers pass a literal or a checked
    value). */
 sp_RbVal sp_box_brat(sp_Bigint *num, sp_Bigint *den) {
+  /* Five allocations run between reading these two and storing them in the
+     object that will finally hold them -- the sign flip, the gcd, the two
+     divisions and the BigRational itself -- and until that last store nothing
+     but these locals refers to them. Rooting the SLOTS covers the
+     reassignments too, since the root is the address. Unrooted, a big
+     Rational read back as (0/0) and the arithmetic died inside the mark
+     walker under SPINEL_GC_STRESS=1. */
+  SP_GC_ROOT(num); SP_GC_ROOT(den);
   if (sp_bigint_sign(den) < 0) { num = sp_bigint_sub(sp_bigint_new_int(0), num); den = sp_bigint_sub(sp_bigint_new_int(0), den); }
   sp_Bigint *g = sp_bigint_gcd(num, den);
+  SP_GC_ROOT(g);
   if (sp_bigint_sign(g) != 0) { num = sp_bigint_div(num, g); den = sp_bigint_div(den, g); }
   sp_BigRational *p = (sp_BigRational *)sp_gc_alloc(sizeof(sp_BigRational), NULL, sp_brat_scan);
   p->num = num; p->den = den;
   return sp_box_obj(p, SP_BUILTIN_BIG_RATIONAL);
 }
 /* Lift a bignum (or an int) to a big Rational num/1. */
-sp_RbVal sp_brat_from_bigint(sp_Bigint *n) { return sp_box_brat(n, sp_bigint_new_int(1)); }
+sp_RbVal sp_brat_from_bigint(sp_Bigint *n) {SP_GC_ROOT(n);   /* the denominator below allocates */
+  return sp_box_brat(n, sp_bigint_new_int(1));
+}
 void sp_addrinfo_scan(void *p) {
   sp_Addrinfo *a = (sp_Addrinfo *)p;
   if (a->ip) sp_mark_string((void *)a->ip);
