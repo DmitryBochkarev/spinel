@@ -170,6 +170,28 @@ The revision comes first and stays first: it is what tells two builds of one
 release apart, and `spin` reads that field as the toolchain identity for its
 probe records.
 
+### What a release is allowed to say
+
+A release name claims nothing about quality, so the question a version has to
+answer is the other one: what has stopped being allowed to change.
+
+`ruby tools/promise_diff.rb [FROM [TO]]` reports that between two commits --
+FROM defaults to the latest release tag, TO to HEAD. It reads five places, all
+from git alone, so it needs no build and works over ranges already in the past:
+the answers tests pin (`test/*.expected`), the PASS rows the ruby/spec
+retention gate keeps, the entries in `docs/limitations.md`, the `spin.toml`
+fields spin actually reads, and the compiler flags `spinel` accepts. Breaks are
+separated from additions, and a promise withdrawn on purpose -- a spec moved to
+`REJECT-BYDESIGN`, a limitation newly stated -- is separated from both.
+
+It is a survey and always exits 0. Whether a break is acceptable is a
+judgement; the report exists to put it in front of someone.
+
+What it cannot see is a promise nobody wrote down. Carried C was compiled by
+presence for years, which was a contract for everyone with a `.c` in their tree
+and was written nowhere (#4362). Those arrive as bug reports, and writing one
+down is what puts it in the report from then on.
+
 Index entries also carry **probe records** — which compiler build a release
 passed or failed its tests under (`spin publish` records a pass for your
 build automatically; `spinel --version` prints the build revision). When
