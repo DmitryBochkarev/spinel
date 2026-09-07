@@ -5634,16 +5634,26 @@ int emit_enum_with_index_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
-/* all?/any?/none?/one? with a block: loop, count the truthy block results,
-   and reduce to the predicate. Returns 1 if handled. */
-/* Emit `if (<truthy(cond)>) _t<cnt>++;` for a predicate loop (#3141). */
-static void emit_pred_cond(Buf *b, int pred_kind, const char *cond, int cnt) {
-  /* pred_kind: 0=bool as-is, 1=always truthy (eval for effect), 2=never, 3=poly */
+enum { PRED_BOOL, PRED_ALWAYS, PRED_NEVER, PRED_POLY };
+
+/* Update the all? flag or count truthy block results, using Ruby truthiness
+   even for a concrete non-bool result (#3141). */
+static void emit_pred_cond(Buf *b, int pred_kind, const char *cond, int acc, int is_all) {
+  if (is_all) {
+    /* Record failure directly: the block can change the receiver's length. */
+    switch (pred_kind) {
+      case PRED_ALWAYS: buf_printf(b, "(void)(%s);\n", cond); break;
+      case PRED_NEVER: buf_printf(b, "{ (void)(%s); _t%d = FALSE; break; }\n", cond, acc); break;
+      case PRED_POLY: buf_printf(b, "if (!sp_poly_truthy(%s)) { _t%d = FALSE; break; }\n", cond, acc); break;
+      default: buf_printf(b, "if (!(%s)) { _t%d = FALSE; break; }\n", cond, acc); break;
+    }
+    return;
+  }
   switch (pred_kind) {
-    case 1: buf_printf(b, "{ (void)(%s); _t%d++; }\n", cond, cnt); break;
-    case 2: buf_printf(b, "(void)(%s);\n", cond); break;
-    case 3: buf_printf(b, "if (sp_poly_truthy(%s)) _t%d++;\n", cond, cnt); break;
-    default: buf_printf(b, "if (%s) _t%d++;\n", cond, cnt); break;
+    case PRED_ALWAYS: buf_printf(b, "{ (void)(%s); _t%d++; }\n", cond, acc); break;
+    case PRED_NEVER: buf_printf(b, "(void)(%s);\n", cond); break;
+    case PRED_POLY: buf_printf(b, "if (sp_poly_truthy(%s)) _t%d++;\n", cond, acc); break;
+    default: buf_printf(b, "if (%s) _t%d++;\n", cond, acc); break;
   }
 }
 /* find_index / index / rindex WITH A BLOCK on a poly receiver.
@@ -5749,7 +5759,7 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
      nil is constant false; a poly value routes through sp_poly_truthy. This is
      the Ruby truthiness a bare `if (value)` would get wrong (#3141). */
   TyKind bvt = comp_ntype(c, bb[bn - 1]);
-  enum { PRED_BOOL, PRED_ALWAYS, PRED_NEVER, PRED_POLY } pred_kind;
+  int pred_kind;
   if (bvt == TY_BOOL) pred_kind = PRED_BOOL;
   else if (bvt == TY_NIL || bvt == TY_VOID) pred_kind = PRED_NEVER;
   else if (bvt == TY_POLY || bvt == TY_UNKNOWN) pred_kind = PRED_POLY;
@@ -5757,7 +5767,7 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
 
   const char *p0raw = block_param_name(c, block, 0);
   const char *p0 = p0raw ? rename_local(p0raw) : NULL;
-  int trecv = ++g_tmp, tcnt = ++g_tmp, ti = ++g_tmp;
+  int trecv = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp;
 
   if (poly_recv) {
     /* boxed receiver (a widened array): the same runtime-dispatch loop
@@ -5774,7 +5784,8 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_int _t%d = sp_poly_arr_len_ex(_t%d);\n", tlen, trecv);
     emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "sp_int _t%d = 0;\n", tcnt);
+    if (is_all) buf_printf(g_pre, "sp_bool _t%d = TRUE;\n", tacc);
+    else buf_printf(g_pre, "sp_int _t%d = 0;\n", tacc);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) {\n", ti, ti, tlen, ti);
     int bodyIndentP = g_indent + 1;
@@ -5826,15 +5837,19 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
       g_indent = saveIndentP;
     }
     emit_indent(g_pre, bodyIndentP);
-    emit_pred_cond(g_pre, nx_used ? 0 : pred_kind, vb.p ? vb.p : "0", tcnt);
+    emit_pred_cond(g_pre, nx_used ? PRED_BOOL : pred_kind, vb.p ? vb.p : "0", tacc, is_all);
     free(vb.p);
+    if (!is_all) {
+      emit_indent(g_pre, bodyIndentP);
+      buf_printf(g_pre, "if (_t%d > %d) break;\n", tacc, is_one ? 1 : 0);
+    }
     emit_indent(g_pre, g_indent);
     buf_puts(g_pre, "}\n");
 
-    if (is_all) buf_printf(b, "(_t%d == _t%d)", tcnt, tlen);
-    else if (is_any) buf_printf(b, "(_t%d > 0)", tcnt);
-    else if (is_none) buf_printf(b, "(_t%d == 0)", tcnt);
-    else buf_printf(b, "(_t%d == 1)", tcnt);
+    if (is_all) buf_printf(b, "_t%d", tacc);
+    else if (is_any) buf_printf(b, "(_t%d > 0)", tacc);
+    else if (is_none) buf_printf(b, "(_t%d == 0)", tacc);
+    else buf_printf(b, "(_t%d == 1)", tacc);
     return 1;
   }
 
@@ -5853,7 +5868,8 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
   emit_indent(g_pre, g_indent);
-  buf_printf(g_pre, "sp_int _t%d = 0;\n", tcnt);
+  if (is_all) buf_printf(g_pre, "sp_bool _t%d = TRUE;\n", tacc);
+  else buf_printf(g_pre, "sp_int _t%d = 0;\n", tacc);
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n", ti, ti, k, trecv, ti);
   int bodyIndent = g_indent + 1;
@@ -5901,15 +5917,19 @@ int emit_predicate_expr(Compiler *c, int id, Buf *b) {
     g_indent = saveIndent;
   }
   emit_indent(g_pre, bodyIndent);
-  emit_pred_cond(g_pre, nx2 ? 0 : pred_kind, vb.p ? vb.p : "0", tcnt);
+  emit_pred_cond(g_pre, nx2 ? PRED_BOOL : pred_kind, vb.p ? vb.p : "0", tacc, is_all);
   free(vb.p);
+  if (!is_all) {
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "if (_t%d > %d) break;\n", tacc, is_one ? 1 : 0);
+  }
   emit_indent(g_pre, g_indent);
   buf_puts(g_pre, "}\n");
 
-  if (is_all) buf_printf(b, "(_t%d == sp_%sArray_length(_t%d))", tcnt, k, trecv);
-  else if (is_any) buf_printf(b, "(_t%d > 0)", tcnt);
-  else if (is_none) buf_printf(b, "(_t%d == 0)", tcnt);
-  else buf_printf(b, "(_t%d == 1)", tcnt);
+  if (is_all) buf_printf(b, "_t%d", tacc);
+  else if (is_any) buf_printf(b, "(_t%d > 0)", tacc);
+  else if (is_none) buf_printf(b, "(_t%d == 0)", tacc);
+  else buf_printf(b, "(_t%d == 1)", tacc);
   return 1;
 }
 
