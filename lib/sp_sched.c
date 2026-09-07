@@ -1081,6 +1081,18 @@ static void run_thread_once(sp_thread *t) { sp_gc_wb((void*)t);   /* PRE/POST: s
       do_report = t->report_on_exception &&
                   !(ec && strcmp(ec, "SystemExit") == 0);
     }
+    /* Record t AFTER the stores above, not only on the way into this function.
+       The barrier at the top has been consumed by then: the transfer runs the
+       thread's body, which allocates, and any collection in there clears every
+       old object's dirty bit and empties the remembered set. retval and the
+       exception fields are all allocated by that body, so an old t was left
+       holding young values nothing had recorded -- and a minor mark does not
+       walk the old list. Thread#value read a recycled string this way.
+
+       A barrier before a call that can collect only covers the stores before
+       the call; gc_wb_cells makes the same choice on the codegen side, and
+       says why in its own comment. */
+    sp_gc_wb((void *)t);
     sp_thread_wake_joiners(t);
     reg_remove(t);   /* collectable once no user reference remains */
     g_nrunning--;
