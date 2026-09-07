@@ -178,6 +178,7 @@ static void sp_gc_fault_report(int sig) {
 }
 __attribute__((constructor)) static void sp_gc_debug_env(void){
   const char *v=getenv("SPINEL_GC_VERIFY"); sp_gc_verify=(v&&*v&&*v!='0');
+  { const char *ph=getenv("SPINEL_GC_PHASES"); sp_gc_ph_on=(ph&&*ph&&*ph!='0'); }
   { const char *fi=getenv("SPINEL_GC_FULL_INTERVAL");
     if(fi&&*fi){ int n=atoi(fi); if(n>0&&n<=4096){ sp_gc_full_interval=n; sp_gc_full_interval_fixed=1; } } }
   { const char *g=getenv("SPINEL_GC_VERIFY_GEN"); sp_gc_verify_gen=(g&&*g&&*g!='0');
@@ -419,6 +420,20 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
     free(cand);
 }
 
+/* Phase accounting (SPINEL_GC_PHASES=1). sp_gc_stat_seconds says how much time
+   a collection cost; it never said which part of one, so "GC is half of wall"
+   gave no way to choose between the mark and the sweep. Each figure below had
+   been measured by patching this file by hand, more than once; this keeps the
+   measurement instead of redoing it.
+
+   The remembered-set clear gets a bucket of its own rather than being folded
+   into a sweep, and earned it: the threaded clear used to walk the WHOLE old
+   heap on every non-full cycle, O(live) per collection, and nothing attributed
+   it -- 5.7s of 13.1s of collector time on a server workload, invisible in the
+   total. That is what this found, and #4380 then removed; it reads ~0 now. */
+double sp_gc_ph_mark = 0, sp_gc_ph_oldsweep = 0, sp_gc_ph_slotsweep = 0,
+       sp_gc_ph_rembclear = 0, sp_gc_ph_strsweep = 0, sp_gc_ph_trim = 0;
+int sp_gc_ph_on = 0;
 unsigned long long sp_gc_stat_collections=0;
 unsigned long long sp_gc_stat_fulls=0;
 double sp_gc_stat_seconds=0;
@@ -430,10 +445,17 @@ static double sp_gc_stat_now(void){
   return 0.0;
 #endif
 }
+/* Close the phase that ended here. Off by default, so a build that does not ask
+   for the breakdown pays one not-taken branch per boundary, against a
+   collection measured in microseconds. */
+#define SP_GC_PH(bucket) \
+  do { if (sp_gc_ph_on) { double _t = sp_gc_stat_now(); (bucket) += _t - ph_t; ph_t = _t; } } while (0)
+
 
 void sp_gc_collect(void){
   size_t ob_before = sp_gc_bytes;
   double stat_t0 = sp_gc_stat_now();
+  double ph_t = stat_t0;
   int full=(sp_gc_cycle%sp_gc_full_interval==0);sp_gc_cycle++;
   /* Forced by growth rather than by the schedule: the old generation has
      outgrown what the last full found live in it. */
@@ -477,6 +499,7 @@ void sp_gc_collect(void){
      record -- the one failure mode of this design, silent until it is a use
      after free. Off unless SPINEL_GC_VERIFY_GEN is set. */
   if(!full && sp_gc_verify_gen) sp_gc_verify_gen_run();
+  SP_GC_PH(sp_gc_ph_mark);
   if(full){
     size_t old_before=sp_gc_old_bytes;
     sp_gc_hdr**pp=&sp_gc_old_heap;sp_gc_old_bytes=0;
@@ -516,6 +539,7 @@ void sp_gc_collect(void){
      string heap from inside it (each worker takes its own slot) and would
      otherwise read this flag while it was still 0 -- and then sweep the old
      string list on a minor cycle, freeing strings only an old object holds. */
+  SP_GC_PH(sp_gc_ph_oldsweep);
   sp_gc_str_minor_only = (sp_gc_str_sweep_hook && !full && sp_gc_minor_on);
 #ifdef SP_THREADS
   { int n=sp_active_workers; if(n<1)n=1; if(n>SP_MAX_WORKERS)n=SP_MAX_WORKERS;
@@ -538,6 +562,7 @@ void sp_gc_collect(void){
      the live set those bytes were never there. Churning large arrays walked the
      counter below zero; the retune read the wrapped value and set a threshold
      near SIZE_MAX, which never fires again (#4073). */
+  SP_GC_PH(sp_gc_ph_slotsweep);
   sp_gc_bytes=sp_gc_old_bytes;
   /* The remembered set has done its job and starts over after EVERY cycle, not
      only a full one. Every young object it led the mark to has just been
@@ -576,6 +601,7 @@ void sp_gc_collect(void){
     for(int ri=0;ri<sp_gc_nremembered;ri++)((sp_gc_hdr*)sp_gc_remembered[ri]-1)->dirty=0;
   }
   sp_gc_nremembered=0; sp_gc_rem_overflow=0;
+  SP_GC_PH(sp_gc_ph_rembclear);
   /* Sweep the string heap only when IT is over its trigger: the sweep is a
      full walk of the live string list, and running it on every OBJECT-heap
      collection made each collection O(live strings) -- the dominant cost of
@@ -600,11 +626,13 @@ void sp_gc_collect(void){
   if(sp_gc_str_sweep_hook){
     sp_gc_str_sweep_hook();
   }
+  SP_GC_PH(sp_gc_ph_strsweep);
   sp_gc_str_minor_only = 0;
   /* malloc_trim walks the allocator arena; once per full cycle was ~10% of
      collection time on allocation-heavy runs. Every 4th full keeps the RSS
      benefit at a fraction of the cost. */
   if(full&&(sp_gc_full_runs%4)==1)malloc_trim(0);
+  SP_GC_PH(sp_gc_ph_trim);
   /* Bump BEFORE the retune hook: the hook is where the stats line is printed
      (sp_alloc.c sees both thresholds and the string heap), and it must read
      this collection, not the previous one. */

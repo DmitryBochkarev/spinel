@@ -101,6 +101,15 @@ available, by printed instructions otherwise, or pushed directly with
 `spin publish` again is how you ship an update. Libraries do not commit a
 `spin.lock`; version selection belongs to the consuming application.
 
+### One version, one spelling
+
+Versions are compared field by field as numbers, with the shorter side padded
+with zeros, so `0.1` and `0.1.0` are the **same version** to every constraint —
+and so are `2026.9.8` and `2026.09.08`. Publishing both would put one version
+in the index twice and split the native object cache, whose directory name is
+the version as written. `spin publish` refuses the second spelling and says
+which one is already there. Pick a spelling and keep it.
+
 ## Dependencies
 
 Declare dependencies in `spin.toml`; `spin` computes the compiler's `-I`
@@ -138,6 +147,50 @@ Selection is MVS: `spin` picks the **lowest** release satisfying the
 constraint, so a build without a lockfile is still deterministic;
 `spin.lock` then pins the exact commit. `spin search [term]` lists index
 entries. Set `SPIN_INDEX` to use another index (a `file://` URL works).
+
+### The compiler's own version
+
+`spinel --version` prints the build revision first and the release it belongs
+to after it:
+
+```
+spinel 6b8ddcd88dd9 (2026.09.08) [cc (Ubuntu 13.3.0) 13.3.0]
+spinel 281cd145ffb4 (2026.09.08+1) [cc ...]     # one commit past that release
+spinel 6b8ddcd88dd9 (unreleased) [cc ...]       # before the first release
+```
+
+Releases are dated: `YYYY.MM.DD`, with `.N` appended for a second release on
+the same day. The fields are fixed width because the calendar fixes them, so
+the plain string order is the chronological order and no field has to be
+padded to a width guessed in advance. The name says when a release was cut and
+claims nothing about how finished it is; what a release promises is recorded
+in `docs/limitations.md` and in the tests, not in the number.
+
+The revision comes first and stays first: it is what tells two builds of one
+release apart, and `spin` reads that field as the toolchain identity for its
+probe records.
+
+### What a release is allowed to say
+
+A release name claims nothing about quality, so the question a version has to
+answer is the other one: what has stopped being allowed to change.
+
+`ruby tools/promise_diff.rb [FROM [TO]]` reports that between two commits --
+FROM defaults to the latest release tag, TO to HEAD. It reads five places, all
+from git alone, so it needs no build and works over ranges already in the past:
+the answers tests pin (`test/*.expected`), the PASS rows the ruby/spec
+retention gate keeps, the entries in `docs/limitations.md`, the `spin.toml`
+fields spin actually reads, and the compiler flags `spinel` accepts. Breaks are
+separated from additions, and a promise withdrawn on purpose -- a spec moved to
+`REJECT-BYDESIGN`, a limitation newly stated -- is separated from both.
+
+It is a survey and always exits 0. Whether a break is acceptable is a
+judgement; the report exists to put it in front of someone.
+
+What it cannot see is a promise nobody wrote down. Carried C was compiled by
+presence for years, which was a contract for everyone with a `.c` in their tree
+and was written nowhere (#4362). Those arrive as bug reports, and writing one
+down is what puts it in the report from then on.
 
 Index entries also carry **probe records** — which compiler build a release
 passed or failed its tests under (`spin publish` records a pass for your
