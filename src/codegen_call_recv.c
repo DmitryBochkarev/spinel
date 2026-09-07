@@ -2996,6 +2996,12 @@ else {
         }
         const char *ka = (rt == TY_POLY_ARRAY) ? "Poly" : k;
         buf_printf(b, "({ sp_%sArray *_t%d = ", ka, ta); emit_expr(c, recv, b); buf_puts(b, ";");
+        /* The loop below re-reads this length on every turn and allocates a
+           pair inside it, so a receiver nothing else holds -- the array a
+           method answered -- could be collected mid-walk, and so could each
+           argument, materialized here and read on every row. Same rule the
+           builtin loops follow (#4367, #4369, #4370). */
+        buf_printf(b, " SP_GC_ROOT(_t%d);", ta);
         for (int j = 0; j < nargs; j++) {
           /* a Range argument materializes to its int array */
           if (at[j] == TY_RANGE) {
@@ -3046,6 +3052,7 @@ else {
             buf_printf(b, " sp_PolyArray *_t%d = sp_zip_arg(", tb[j]);
             emit_boxed(c, argv[j], b);
             buf_puts(b, ");");
+            buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
             at[j] = TY_POLY_ARRAY;
             continue;
           }
@@ -3056,11 +3063,13 @@ else {
             buf_printf(b, " sp_PolyArray *_t%d = sp_poly_to_poly_array(", tb[j]);
             emit_expr(c, argv[j], b);
             buf_puts(b, ");");
+            buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
             at[j] = TY_POLY_ARRAY;
             continue;
           }
           const char *kj = (at[j] == TY_POLY_ARRAY) ? "Poly" : (array_kind(at[j]) ? array_kind(at[j]) : "Poly");
           buf_printf(b, " sp_%sArray *_t%d = ", kj, tb[j]); emit_expr(c, argv[j], b); buf_puts(b, ";");
+          buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
         }
         buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {",
@@ -4462,6 +4471,7 @@ else {
         }
         Buf ra = expr_buf(c, recv);
         buf_printf(b, "({ sp_PolyArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
+        buf_printf(b, " SP_GC_ROOT(_t%d);", ta);   /* see the typed arm; the loop re-reads this length every turn and allocates inside it */
         for (int j = 0; j < nargs; j++) {
           /* a Range argument materializes to its int array */
           if (at[j] == TY_RANGE) {
@@ -4512,6 +4522,7 @@ else {
             buf_printf(b, " sp_PolyArray *_t%d = sp_zip_arg(", tb[j]);
             emit_boxed(c, argv[j], b);
             buf_puts(b, ");");
+            buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
             at[j] = TY_POLY_ARRAY;
             continue;
           }
@@ -4522,11 +4533,13 @@ else {
             buf_printf(b, " sp_PolyArray *_t%d = sp_poly_to_poly_array(", tb[j]);
             emit_expr(c, argv[j], b);
             buf_puts(b, ");");
+            buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
             at[j] = TY_POLY_ARRAY;
             continue;
           }
           const char *kj = (at[j] == TY_POLY_ARRAY) ? "Poly" : (array_kind(at[j]) ? array_kind(at[j]) : "Poly");
           buf_printf(b, " sp_%sArray *_t%d = ", kj, tb[j]); emit_expr(c, argv[j], b); buf_puts(b, ";");
+          buf_printf(b, " SP_GC_ROOT(_t%d);", tb[j]);
         }
         buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_PolyArray_length(_t%d); _t%d++) {", ti, ti, ta, ti);
