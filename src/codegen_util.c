@@ -1236,11 +1236,18 @@ const char *ffi_cb_arg_ctype(const char *spec) {
 /* The initial value of a local's slot: its type's zero, or the type's nil
    sentinel when the local has no definite assignment anywhere (#3388). */
 const char *local_init_value(Compiler *c, LocalVar *lv) {
-  (void)c;
   if (lv->or_write_only && !lv->is_param && !lv->is_block_param) {
     const char *nv = nil_value(lv->type);
     if (nv) return nv;
   }
+  /* A value-type object is stored INLINE (sp_X, not sp_X *), so its zero is a
+     zeroed struct. default_value answers the blanket "NULL" for every object
+     type, which declares `sp_K lv_r = NULL;` -- an invalid initializer, and a
+     C build that stops. declare_local has had this arm all along; the inlined
+     path reached the shared helper instead. The shape that finds it is the
+     resource idiom: `def self.open; r = new; begin; yield r; ensure; r.close;
+     end; end` on a class small enough to be a value type. */
+  if (comp_ty_value_obj(c, lv->type)) return "{0}";
   return lv->type == TY_RANGE ? "(sp_Range){0}" : default_value(lv->type);
 }
 int local_nil_test(Compiler *c, LocalVar *lv, const char *ref, Buf *out) {

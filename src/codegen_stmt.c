@@ -6097,10 +6097,25 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
         char g[24]; snprintf(g, sizeof g, "_retf%d", eid);
         if (emit_frame_unwind(b, 0, g)) { buf_puts(b, "\n"); emit_indent(b, indent); }
       }
+      /* Inside an INLINED method the enclosing C function belongs to the
+         CALLER, so a raw `return` here returns from that one -- `return
+         _retv5;` of an sp_RbVal out of `main`, which C rejects and which is
+         not what the Ruby meant either. Funnel through the inline exit, the
+         single one every return at ensure-depth 0 already takes. The shape
+         that finds it pairs an early return with an ensure tail, which is the
+         resource idiom: `def self.open(..); r = new(..); return r unless
+         block_given?; begin; yield r; ensure; r.close; end; end`. */
+      if (g_method_pr_label) {
+        if (has_retval && g_method_pr_var)
+          buf_printf(b, "if (_retf%d) { %s = _retv%d; goto %s; }\n",
+                     eid, g_method_pr_var, eid, g_method_pr_label);
+        else
+          buf_printf(b, "if (_retf%d) goto %s;\n", eid, g_method_pr_label);
+      }
       /* inside a first-class proc body routing returns through the boxed slot
          (the universal proc return ABI) the deferred value returns through the
          slot, not a raw C return of an sp_RbVal from an sp_int function */
-      if (has_retval && g_in_proc_body && g_result_var && g_result_poly)
+      else if (has_retval && g_in_proc_body && g_result_var && g_result_poly)
         buf_printf(b, "if (_retf%d) { %s = _retv%d; return 0; }\n", eid, g_result_var, eid);
       /* a fiber body is `static void`: see g_c_ret_void */
       else if (has_retval && g_c_ret_void) buf_printf(b, "if (_retf%d) return;\n", eid);
