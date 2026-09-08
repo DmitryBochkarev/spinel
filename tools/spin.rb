@@ -924,7 +924,13 @@ def git_fetch(name, url, ref, want_sha)
       end
     end
   end
-  tmp = File.join(pkgs, ".fetch-" + name)
+  # Staging is PER PROCESS. A path fixed per package name is shared by every
+  # concurrent caller in one tree: each `rm -rf`s what another is cloning into,
+  # and the second clone finds a non-empty directory and dies. Eight parallel
+  # `spin flags` left seven failures and seven empty flag strings, which
+  # `$(shell ...)` in a Makefile turns into a silent build with no -I at all
+  # (#4393).
+  tmp = File.join(pkgs, ".fetch-" + name + "-" + Process.pid.to_s)
   system("rm -rf " + tmp)
   cloned = false
   if want_sha != ""
@@ -952,10 +958,33 @@ def git_fetch(name, url, ref, want_sha)
   spin_die("fetch verify failed: wanted " + want_sha + ", got " + sha) if want_sha != "" && sha != want_sha
   ver = gem_version_of(tmp)
   final = File.join(pkgs, name + "-" + ver)
-  system("rm -rf " + final)
+  stamp = File.join(final, ".spin-sha")
+  # Someone else may have published this exact version while we fetched. Take
+  # theirs rather than removing it: a concurrent caller's `-I` already points
+  # inside that directory, and `rm -rf` on it pulled the include path out from
+  # under a build that was using it.
+  if File.directory?(final) && File.exist?(stamp) && File.read(stamp).strip == sha
+    system("rm -rf " + tmp)
+    return final + "\n" + ver + "\n" + sha
+  end
   system("rm -rf " + File.join(tmp, ".git"))
   File.write(File.join(tmp, ".spin-sha"), sha + "\n")
-  ok2 = system("mv " + tmp + " " + final)
+  # rename(2) is atomic and REFUSES to nest into an existing directory, which
+  # is what makes losing the race detectable rather than silent -- `mv` would
+  # have moved our tree INSIDE theirs.
+  ok2 = false
+  begin
+    File.rename(tmp, final)
+    ok2 = true
+  rescue StandardError
+    if File.exist?(stamp) && File.read(stamp).strip == sha
+      system("rm -rf " + tmp)          # they published what we wanted
+      ok2 = true
+    else
+      system("rm -rf " + final)        # a stale tree at another sha
+      ok2 = system("mv " + tmp + " " + final)
+    end
+  end
   spin_die("fetch failed: cannot place " + final) unless ok2
   final + "\n" + ver + "\n" + sha
 end
