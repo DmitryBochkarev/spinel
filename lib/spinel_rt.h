@@ -1147,6 +1147,13 @@ static inline const char *sp_File_read_n(sp_File *f, sp_int n) {
   /* record the byte count read: without it an embedded NUL truncated every
      later length/slice, which read the bytes back through strlen (#3540) */
   if ((sp_int)got == n) { r[got] = 0; sp_str_set_len(r, got); return r; }
+  /* The short read copies into a right-sized string, and that allocation can
+     collect -- with the bytes just read held by nothing but this C local. On a
+     small read the collector never fires and it looked right for years; asking
+     for 5 MB and getting 1 MB freed the source and the copy read unmapped
+     pages. Found compiling the Doom gem, whose WAD reader asks for a lump by
+     offset and runs past the end of the file. */
+  SP_GC_ROOT_STR(r);
   char *s = sp_str_alloc(got);
   memcpy(s, r, got);
   s[got] = 0;
