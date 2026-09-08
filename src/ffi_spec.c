@@ -18,7 +18,12 @@ static const FfiSpecInfo FFI_SPECS[] = {
   { "int64",       TY_INT,         "int64_t"         },
   { "float",       TY_FLOAT,       "float"           },
   { "double",      TY_FLOAT,       "double"          },
-  { "bool",        TY_BOOL,        "int"             },
+  /* _Bool, NOT int: a C function declared to return `bool` writes one byte
+     (AL on x86-64) and leaves the rest of the register alone. Prototyping it
+     as int here reads all 64 bits, so a false return whose upper bits are
+     dirty comes back true. Same mismatch native_c_type carried until
+     b80f6302, one layer over -- the ffi gem maps :bool to _Bool too. */
+  { "bool",        TY_BOOL,        "_Bool"           },
   { "str",         TY_STRING,      "const char *"    },
   { "binstr",      TY_STRING,      "const char *"    },  /* bytes + sp_ffi_bin_len */
   { "ptr",         TY_POLY,        "void *"          },
