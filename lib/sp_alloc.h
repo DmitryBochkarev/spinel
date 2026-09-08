@@ -419,6 +419,19 @@ static inline void sp_str_set_len(char *s, size_t len) {
   }
 }
 
+/* A fresh BINARY-tagged empty string, for the zero-length results whose source
+   was binary: CRuby gives `bin[0, 0]`, `bin.byteslice(0, 0)`, `bin * 0` and
+   `io.read(0)` the binary encoding, and the shared empty string cannot carry
+   it -- marking that would tag it for every other holder of the same pointer.
+   So these allocate, and only on that path. */
+static inline char *sp_str_empty_binary(void) {
+  char *r = sp_str_alloc_raw(1);
+  r[0] = 0;
+  sp_str_set_len(r, 0);
+  sp_str_mark_binary(r);
+  return r;
+}
+
 /* Byte count for the binary-safe return modes (FFI `:binstr`, native binding
    `:cbinstr`). A C function returning bytes rather than a NUL-terminated
    string publishes the exact length here just before it returns; the call site

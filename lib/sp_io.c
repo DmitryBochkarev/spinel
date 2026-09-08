@@ -841,7 +841,7 @@ sp_File *sp_sock_accept_nb(sp_File *f, sp_bool exc) {SP_GC_ROOT(f);
 const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
   SP_IO_OPEN(f);
   if (n < 0) sp_raise_cls("EOFError", "end of file reached");
-  if (n == 0) return sp_str_from_bytes("", 0);
+  if (n == 0) return sp_str_empty_binary();
   char *r = sp_str_alloc((size_t)n);
   ssize_t got;
   long pend = sp_io_buffered(f);
@@ -856,6 +856,7 @@ const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
   if (got == 0) sp_raise_cls("EOFError", "end of file reached");
   r[got] = 0;
   sp_str_set_len(r, (size_t)got);
+  sp_str_mark_binary(r);   /* readpartial / sysread answer ASCII-8BIT, as CRuby */
   return r;
 }
 

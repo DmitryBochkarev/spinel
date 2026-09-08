@@ -1108,6 +1108,7 @@ static inline const char *sp_File_pread(sp_File *f, sp_int len, sp_int off) {
   if (got == 0 && len > 0) sp_raise_cls("EOFError", "end of file reached");
   buf[got] = '\0';
   sp_str_set_len(buf, (size_t)got);
+  sp_str_mark_binary(buf);   /* pread answers ASCII-8BIT, as CRuby */
   return buf;
 }
 sp_int sp_File_sysseek(sp_File *f, sp_int off, sp_int whence);
@@ -1126,38 +1127,49 @@ static inline const char *sp_File_read(sp_File *f) {
   /* A handle whose read can block fills to EOF through the parking slurp: the
      plain one asks fread for a whole buffer and sits in the kernel between a
      pipe writer's chunks, holding the OS worker (#4307). */
-  if (f->park == 2) return sp_slurp_stream_parked(f);
-  /* One reader for every stream: the seek size is a hint, so a seekable file
-     reporting 0 (a /proc entry) and a non-seekable one (a pipe end, a socket,
-     a FIFO) both read to EOF (#3411). */
-  return sp_slurp_stream(f->fp);
+  /* A read with no length carries the handle's own encoding, so a binary
+     handle answers ASCII-8BIT (CRuby); a text one stays on the text side.
+     This is the one read whose answer depends on the mode -- read(n), pread
+     and readpartial are BINARY whatever the handle was opened as. */
+  const char *r = (f->park == 2) ? sp_slurp_stream_parked(f) : sp_slurp_stream(f->fp);
+  if (r && sp_File_binmode_p(f)) sp_str_mark_binary((char *)r);
+  return r;
 }
 /* IO#read(n): read up to n bytes from the current position. Returns NULL
    (nil) at EOF for a positive n, "" for n == 0, and the whole rest for a
    negative n (treated as the no-count read). A short read produces a
-   string of the bytes actually read. */
+   string of the bytes actually read.
+
+   The result is BINARY whatever mode the handle was opened in -- that is what
+   CRuby's read-with-a-length answers, and it is not cosmetic: indexing a text
+   string is by CHARACTER, so `data[4, 4]` on WAD bytes whose first byte is a
+   UTF-8 lead byte slid the window a byte to the right and read the wrong
+   fields. The Doom gem's lump directory came back with one entry in forty
+   naming "ODES" with a nonsense size, and the renderer then drew 1496 pixels
+   out of 76800. */
 static inline const char *sp_File_read_n(sp_File *f, sp_int n) {
   SP_IO_OPEN(f);
   sp_io_wait_readable(f);
   if (n < 0) return sp_File_read(f);
-  if (n == 0) return sp_str_empty;
+  if (n == 0) return sp_str_empty_binary();
   char *r = sp_str_alloc((size_t)n);
   size_t got = fread(r, 1, (size_t)n, f->fp);
   if (got == 0) return NULL;
   /* record the byte count read: without it an embedded NUL truncated every
      later length/slice, which read the bytes back through strlen (#3540) */
-  if ((sp_int)got == n) { r[got] = 0; sp_str_set_len(r, got); return r; }
+  if ((sp_int)got == n) { r[got] = 0; sp_str_set_len(r, got); sp_str_mark_binary(r); return r; }
   /* The short read copies into a right-sized string, and that allocation can
      collect -- with the bytes just read held by nothing but this C local. On a
-     small read the collector never fires and it looked right for years; asking
+     small read the collector never fires and it looked fine for years; asking
      for 5 MB and getting 1 MB freed the source and the copy read unmapped
-     pages. Found compiling the Doom gem, whose WAD reader asks for a lump by
+     pages. Found compiling the Doom gem, whose WAD reader reads a lump by
      offset and runs past the end of the file. */
   SP_GC_ROOT_STR(r);
   char *s = sp_str_alloc(got);
   memcpy(s, r, got);
   s[got] = 0;
   sp_str_set_len(s, got);
+  sp_str_mark_binary(s);
   return s;
 }
 static inline const char *sp_File_path(sp_File *f) { return f && f->path ? f->path : sp_str_empty; }

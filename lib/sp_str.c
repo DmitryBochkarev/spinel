@@ -118,19 +118,6 @@ sp_int sp_str_field_count(const char*s,const char*sep){
    Only freshly allocated results are marked. The shared empty string and other
    static returns are never touched: marking one would tag it for every other
    holder of the same pointer. */
-/* A fresh BINARY-tagged empty string, for the zero-length results whose source
-   was binary: CRuby gives `bin[0, 0]`, `bin.byteslice(0, 0)` and `bin * 0` the
-   source's encoding, and the shared empty string cannot carry it -- marking
-   that would tag it for every other holder of the same pointer. So these
-   allocate, and only on that path. */
-static inline char *sp_str_empty_binary(void) {
-  char *r = sp_str_alloc_raw(1);
-  r[0] = 0;
-  sp_str_set_len(r, 0);
-  sp_str_mark_binary(r);
-  return r;
-}
-
 static inline char *sp_str_bin_from(char *r, const char *a) {
   if (a && sp_str_is_binary(a)) sp_str_mark_binary(r);
   return r;
