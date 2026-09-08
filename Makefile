@@ -697,7 +697,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -865,6 +865,22 @@ gc-threshold-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	  { echo "gc-threshold-test: FAIL (STR_KB moved the object trigger too: $$bo -> $$so)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-threshold-test: pass"; else exit 1; fi
+
+# A byref String parameter that a lifted proc also captures: the capture holds
+# the CALLER's slot, which for the stack shape is not a GC object, and marking
+# it read a header off the stack (#4391). Run under GC stress because the fault
+# needs a collection while the proc is live -- with stress that is every
+# allocation, which makes it deterministic; without it the program is quiet.
+byref-capture-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
+	@tmp=$$(mktemp -d /tmp/spinel-byrefcap.XXXXXX); ok=1; \
+	$(SPINEL) test/rbs-seed/byref_capture_scan.rb --rbs test/rbs-seed/sig -o "$$tmp/b" >/dev/null 2>&1 || \
+	  { echo "byref-capture-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	SPINEL_GC_STRESS=1 $(TIMEOUT60) "$$tmp/b" > "$$tmp/out" 2>/dev/null || \
+	  { echo "byref-capture-test: FAIL (crashed or timed out under GC stress)"; ok=0; }; \
+	cmp -s "$$tmp/out" test/rbs-seed/byref_capture_scan.expected || \
+	  { echo "byref-capture-test: FAIL (output differs)"; diff -u test/rbs-seed/byref_capture_scan.expected "$$tmp/out" | head -5; ok=0; }; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "byref-capture-test: pass"; else exit 1; fi
 
 GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_retval.rb \

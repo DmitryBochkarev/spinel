@@ -4871,7 +4871,24 @@ else if (orecv >= 0 && onm) {
     buf_printf(&g_procs, "static void _proc_cap_scan_%d(void *p) {\n", pid);
     buf_printf(&g_procs, "  sp_gc_mark(p);\n");
     buf_printf(&g_procs, "  _proc_cap_%d *_c = (_proc_cap_%d *)p;\n", pid, pid);
-    for (int i = 0; i < ncap; i++) buf_printf(&g_procs, "  if (_c->c_%s) sp_gc_mark((void *)_c->c_%s);\n", caps.v[i], caps.v[i]);
+    for (int i = 0; i < ncap; i++) {
+      /* A BYREF parameter's cell is the CALLER's slot -- the address of a
+         stack local, or a cell the caller already roots -- and not a GC
+         object at all. Marking it walked a header that is not there: on the
+         stack shape sp_gc_mark reads the byte before a stack address, and on
+         anything that byte does not spell a known marker it dereferences the
+         word as a header and calls through h->scan. That is the SIGSEGV in
+         the fiber root walk (#4391), and it needs a real server to arrive
+         because the capture has to outlive a park.
+         Not marking loses nothing: whatever the slot is, the caller is
+         holding it -- that is the whole premise of lending it. */
+      LocalVar *ccl = scope_local(bs, caps.v[i]);
+      if (ccl && ccl->byref_out) {
+        buf_printf(&g_procs, "  /* c_%s is a byref slot: the caller roots it */\n", caps.v[i]);
+        continue;
+      }
+      buf_printf(&g_procs, "  if (_c->c_%s) sp_gc_mark((void *)_c->c_%s);\n", caps.v[i], caps.v[i]);
+    }
     if (cap_self && self_is_value) {
       if (class_needs_scan(&c->classes[bs->class_id]))
         buf_printf(&g_procs, "  sp_%s_scan(&_c->__self_val);\n", self_cls);
