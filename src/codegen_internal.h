@@ -282,7 +282,13 @@ void emit_line_directive(Compiler *c, int id, Buf *b);
    pushes a context on this stack; emit_return uses the top to emit a
    deferred goto instead of a bare C `return`. */
 #define MAX_ENSURE_DEPTH 32
-typedef struct { int lid; int has_retval; int exc_base; } EnsureCtx;
+/* retv_ty is the TYPE OF THE FRAME'S OWN SLOT, which is not always the
+   enclosing method's return type: an inlined method's ensure frame is
+   declared while g_ret_type is the INLINE's, and the block spliced at its
+   yield then defers a `return` belonging to the OUTER method into it. Reading
+   g_ret_type at the store site therefore asked the wrong function whether to
+   box, and a String went into an sp_RbVal slot unboxed. */
+typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; } EnsureCtx;
 extern EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 extern int       g_ensure_depth;
 

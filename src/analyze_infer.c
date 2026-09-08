@@ -6740,6 +6740,25 @@ TyKind infer_uncached(Compiler *c, int id) {
              wk == NK_LocalVariableOrWriteNode || wk == NK_LocalVariableAndWriteNode) &&
             nt_ref(nt, w, "value") == id) return TY_POLY;
       }
+      /* A yield whose value leaves through an ENSURE frame is in the same
+         position as one written to a local, for the same reason: the frame
+         carries the value in a slot of its own, and that slot settles its type
+         at whichever call site is analyzed first. The per-site coercion the
+         comment above relies on handles the method's own tail, and does not
+         reach a tail one frame in. So `def run; begin; yield 7; ensure; nil;
+         end; end` answered its first site's type at its second -- `p run { |x|
+         x == 7 }` then `p run { |x| x * 3 }` printed true twice, where CRuby
+         says true and 21, and a pair whose types do not share a C slot stopped
+         the build instead. Poly makes the slot a boxed carrier, and each
+         inlined site boxes its own value. */
+      for (int w = 0; w < nt->count; w++) {
+        if (nt_kind(nt, w) != NK_BeginNode) continue;
+        if (nt_ref(nt, w, "ensure_clause") < 0) continue;
+        int st = nt_ref(nt, w, "statements");
+        if (st < 0) continue;
+        int bn = 0; const int *bs = nt_arr(nt, st, "body", &bn);
+        if (bs && bn > 0 && bs[bn - 1] == id) return TY_POLY;
+      }
     }
     return yield_value_type(c, ymi);
   }

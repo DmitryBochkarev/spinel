@@ -5373,7 +5373,8 @@ void emit_return(Compiler *c, int id, Buf *b, int indent) {
       }
       else if (n > 0) {
         buf_printf(b, "_retv%d = ", ctx->lid);
-        if (g_ret_type == TY_POLY && comp_ntype(c, a[0]) != TY_POLY) emit_boxed(c, a[0], b);
+        /* the FRAME's slot type, not g_ret_type: see EnsureCtx.retv_ty */
+        if (ctx->retv_ty == TY_POLY && comp_ntype(c, a[0]) != TY_POLY) emit_boxed(c, a[0], b);
         else emit_expr(c, a[0], b);
         buf_puts(b, "; ");
       }
@@ -5956,7 +5957,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       else
         buf_printf(b, " _retv%d = %s;\n", eid, default_value(g_ret_type));
     }
-    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth };
+    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type };
 
     /* retry in the rescue restarts the body; the ensure runs only when the
        begin finally exits (matching CRuby, where an aborted attempt does not
