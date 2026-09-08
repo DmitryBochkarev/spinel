@@ -128,7 +128,7 @@ export LD_LIBRARY_PATH := $(OPENSSL_PREFIX)/lib$(if $(LD_LIBRARY_PATH),:$(LD_LIB
 endif
 endif
 endif
-BUNDLED_NATIVE_OBJS = packages/json/sp_json.o packages/stringio/sp_stringio.o packages/strscan/sp_strscan.o packages/base64/sp_base64.o packages/tmpdir/sp_tmpdir.o
+BUNDLED_NATIVE_OBJS = packages/json/sp_json.o packages/stringio/sp_stringio.o packages/strscan/sp_strscan.o packages/base64/sp_base64.o packages/tmpdir/sp_tmpdir.o packages/zlib/sp_zlib.o
 ifeq ($(OPENSSL_AVAILABLE),yes)
 BUNDLED_NATIVE_OBJS += packages/openssl/sp_openssl.o
 endif
@@ -415,6 +415,17 @@ packages/tmpdir/sp_tmpdir.o: packages/tmpdir/sp_tmpdir.c \
 packages/tmpdir/sp_tmpdir_mt.o: packages/tmpdir/sp_tmpdir.c \
                                 lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h
 	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(PKG_MT_FLAGS) -Ilib packages/tmpdir/sp_tmpdir.c -o $@
+
+# zlib: DEFLATE, zlib and gzip in the package's own C. No system libz and so
+# no availability probe: a host with libz.so.1 and no zlib.h -- an ordinary
+# box without the -dev package -- would drop the package and give a green
+# `make test` that never ran it. Pure C, no struct.
+packages/zlib/sp_zlib.o: packages/zlib/sp_zlib.c \
+                         lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h
+	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) -Ilib packages/zlib/sp_zlib.c -o $@
+packages/zlib/sp_zlib_mt.o: packages/zlib/sp_zlib.c \
+                            lib/spinel/runtime.h lib/sp_alloc.h lib/sp_gc.h lib/sp_types.h
+	$(CC) -c $(COPT) -Wno-all $(SEC_FLAGS) $(PKG_MT_FLAGS) -Ilib packages/zlib/sp_zlib.c -o $@
 
 build/sp_cold.o: lib/sp_cold.c $(RT_HDRS)
 	@mkdir -p build
