@@ -725,6 +725,41 @@ static int const_ref_is_rescued(Compiler *c, int id) {
   return 0;
 }
 
+/* The constant path AS WRITTEN, for a message someone has to find in their
+   source. The `par_nmc` the arms below key on is deliberately the parent's
+   LEAF name (the ffi and platform-constant tables are keyed that way), and
+   reusing it for the message named `SSL::VERIFY_NONE` where the source said
+   `OpenSSL::SSL::VERIFY_NONE`, and `C::D` for `A::B::C::D`. Neither string
+   occurs in the program, which is exactly what a reader greps for. Walk the
+   parent chain instead.
+
+   A prefix that is not a written constant (`BLOCK::CODE`, where BLOCK holds a
+   class) stops the walk: what is left is the written tail, which is still more
+   of the path than the leaf pair was. `Object::X` keeps dropping the Object,
+   as CRuby does -- Object's constants are the top-level ones (#3976). */
+static void const_path_written(const NodeTable *nt, int id, char *out, size_t cap) {
+  const char *parts[16];
+  int n = 0, cur = id;
+  while (cur >= 0 && n < 16) {
+    const char *t = nt_type(nt, cur);
+    const char *nm = t ? nt_str(nt, cur, "name") : NULL;
+    if (!nm || !*nm) break;
+    if (sp_streq(t, "ConstantPathNode")) { parts[n++] = nm; cur = nt_ref(nt, cur, "parent"); }
+    else if (sp_streq(t, "ConstantReadNode")) { parts[n++] = nm; break; }
+    else break;
+  }
+  if (n > 1 && sp_streq(parts[n - 1], "Object")) n--;
+  size_t off = 0;
+  out[0] = 0;
+  for (int i = n - 1; i >= 0; i--) {
+    int w = snprintf(out + off, off < cap ? cap - off : 0, "%s%s",
+                     i == n - 1 ? "" : "::", parts[i]);
+    if (w < 0) break;
+    off += (size_t)w;
+    if (off >= cap) { out[cap - 1] = 0; break; }
+  }
+}
+
 /* One build-time warning per constant that the whole program never defines.
    The reference still emits its runtime NameError (CRuby's behaviour, which
    ruby/spec asserts), but the build no longer says nothing at all about a name
@@ -2260,11 +2295,15 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     {
       char fullname[512];
       /* CRuby qualifies the name by a NAMED module (`M::Missing`) but not by
-         Object, whose constants are the top-level ones (#3976). */
-      if (par_nmc && nm && !sp_streq(par_nmc, "Object"))
-        snprintf(fullname, sizeof fullname, "%s::%s", par_nmc, nm);
-      else if (nm) snprintf(fullname, sizeof fullname, "%s", nm);
-      else snprintf(fullname, sizeof fullname, "?");
+         Object, whose constants are the top-level ones (#3976). The written
+         path is what goes in the message; see const_path_written. */
+      const_path_written(nt, id, fullname, sizeof fullname);
+      if (!fullname[0]) {
+        if (par_nmc && nm && !sp_streq(par_nmc, "Object"))
+          snprintf(fullname, sizeof fullname, "%s::%s", par_nmc, nm);
+        else if (nm) snprintf(fullname, sizeof fullname, "%s", nm);
+        else snprintf(fullname, sizeof fullname, "?");
+      }
       if (!const_ref_is_rescued(c, id)) warn_undefined_constant(c, id, fullname);
       buf_printf(b, "(sp_raise_cls(\"NameError\", \"uninitialized constant %s\"), ((sp_Class){-1}))", fullname);
     }
