@@ -14,7 +14,9 @@ const char *sp_json_str(const char *s);   /* quote + escape a string */
 const char *sp_json_val(sp_RbVal v);      /* serialize any boxed value */
 const char *sp_json_pretty(sp_RbVal v);   /* two-space-indented serialization */
 sp_RbVal sp_json_parse(const char *s);    /* parse JSON text into a boxed value */
-/* A plain object (Struct) is serialized by reflecting it into a hash via the
-   generic sp_obj_to_hash_fn hook (declared in sp_gc.h, installed by the
-   generated program); sp_json_val then serializes that hash. */
+/* An object serializes as CRuby's json does, which is method dispatch: a class
+   with its own #to_json answers through the sp_obj_to_json_fn hook (declared in
+   sp_gc.h, installed by the generated program), and everything else is its
+   #to_s as a JSON string -- which is what Object#to_json is over there. A
+   Struct has no override of its own, so it reads "#<struct S x=1>" (#4387). */
 #endif /* SP_JSON_H */

@@ -6687,10 +6687,24 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
     if (comp_ty_value_obj(c, ty_object(i))) continue;
     int tdef = -1;
     int tmi = comp_method_in_chain(c, i, "to_s", &tdef);
-    if (tmi < 0 || !c->scopes[tmi].reachable || c->scopes[tmi].ret != TY_STRING ||
-        c->scopes[tmi].nparams != 0) continue;
-    buf_printf(b, "    case %d: return sp_%s_%s((sp_%s *)p);\n",
-               i, c->classes[tdef].c_name, mc(c->scopes[tmi].name), c->classes[tdef].c_name);
+    if (tmi >= 0 && c->scopes[tmi].reachable && c->scopes[tmi].ret == TY_STRING &&
+        c->scopes[tmi].nparams == 0) {
+      buf_printf(b, "    case %d: return sp_%s_%s((sp_%s *)p);\n",
+                 i, c->classes[tdef].c_name, mc(c->scopes[tmi].name), c->classes[tdef].c_name);
+      continue;
+    }
+    /* Struct/Data #to_s IS #inspect in CRuby, and they have a generated one
+       (`#<struct S x=1>` / `#<data ...>`). Without this arm a BOXED struct fell
+       to the object default and rendered `#<S:0x...>` -- so `b.to_s` and
+       "#{b}" disagreed with a directly-typed receiver, which compiles straight
+       to the same inspect. The inspect dispatcher beside this one already
+       carries the arm for the same reason (#4387). A user #to_s still wins:
+       it is taken above. */
+    if (tci->is_struct || tci->is_data) {
+      buf_printf(b, "    case %d: return sp_%s_inspect((sp_%s *)p);\n", i, tci->c_name, tci->c_name);
+      continue;
+    }
+    continue;
   }
   buf_puts(b, "    default: return NULL;\n  }\n}\n");
   /* user #to_int / #to_str bridges: the runtime's implicit-conversion sites

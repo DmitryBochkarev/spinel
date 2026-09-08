@@ -12,7 +12,7 @@
 module JSON
   native_lib "json"
   native_obj "packages/json/sp_json.o"   # carried C, linked only when required
-  native_obj_reflect                     # serialize a Struct via generic obj->hash reflection
+  native_obj_reflect                     # gates the generated #to_json bridge (sp_obj_to_json_fn)
   native_func :generate, [:any], :string, "sp_json_val"
   native_func :dump,     [:any], :string, "sp_json_val"
   native_func :parse,    [:string], :any,  "sp_json_parse"

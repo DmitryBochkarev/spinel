@@ -10114,8 +10114,18 @@ static int json_to_json_is_builtin(Compiler *c, int recv) {
      hold: a builtin serializes, and a user object goes through
      sp_obj_to_json_fn, which prefers that class's own #to_json exactly as
      CRuby's json does (packages/json/sp_json.c). */
-  if (rt == TY_UNKNOWN || ty_is_object(rt)) return 0;
+  if (rt == TY_UNKNOWN) return 0;
   if (rt == TY_POLY) return 1;
+  /* A static object type goes through the generator too, unless its own class
+     defines #to_json -- that dispatch has to win, and here it can, because the
+     class is known. CRuby reaches the same two answers through method lookup:
+     json mixes #to_json into Object (as `to_s.to_json`) and a class's own
+     override shadows it. Declining outright left `Struct.new(:x).new(1).to_json`
+     unresolved, where CRuby answers "#<struct S x=1>" (#4387). */
+  if (ty_is_object(rt)) {
+    int oc = ty_object_class(rt);
+    return oc >= 0 && comp_method_in_chain(c, oc, "to_json", NULL) < 0;
+  }
   const char *bn = ty_is_hash(rt) ? "Hash"
                  : ty_is_array(rt) ? "Array"
                  : (rt == TY_STRING || rt == TY_STRBUF) ? "String"

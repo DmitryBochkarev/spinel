@@ -1838,7 +1838,10 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
      a user class's own #to_json still wins through the runtime hook. Excluding
      it left `JSON.parse(s).to_json` unresolved (#4385). */
   if (recv >= 0 && sp_streq(name, "to_json") && nt_ref(nt, id, "block") < 0 &&
-      sp_feature_required("json") && rt != TY_UNKNOWN && !ty_is_object(rt))
+      sp_feature_required("json") && rt != TY_UNKNOWN &&
+      (!ty_is_object(rt) ||
+       (ty_object_class(rt) >= 0 &&
+        comp_method_in_chain(c, ty_object_class(rt), "to_json", NULL) < 0)))
     { *out = TY_STRING; return 1; }
 
   /* poly.scan(re): a String read out of a container. Same shape as the

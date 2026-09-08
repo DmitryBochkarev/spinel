@@ -99,6 +99,21 @@ static const char *jb_finish(jbuf *b) {
   return r;
 }
 
+/* An object's #to_s, the way sp_poly_to_s renders it: the class's own method
+   through the generated dispatcher, and otherwise CRuby's default form. The
+   generated TU's renderer is a static inline in spinel_rt.h, which this TU
+   deliberately does not include (see the note at the top), so the two arms are
+   reached through the hooks the generated program installs. */
+static const char *sp_json_obj_to_s(sp_RbVal v) {
+  if (v.cls_id >= 0 && sp_obj_to_s_fn) {
+    const char *us = sp_obj_to_s_fn(v.cls_id, v.v.p);
+    if (us) return us;
+  }
+  return sp_sprintf("#<%s:0x%016llx>",
+                    sp_obj_cls_name_fn ? sp_obj_cls_name_fn(v.cls_id) : "Object",
+                    (unsigned long long)(uintptr_t)v.v.p);
+}
+
 const char *sp_json_str(const char *s) {
   jbuf b; memset(&b, 0, sizeof b);
   jb_c(&b, '"');
@@ -203,11 +218,24 @@ static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth) {
     jb_c(b, '}');
     return;
   }
-  /* a plain object (Struct/Data): reflect it into a hash of its members
-     (the generated program installs sp_obj_to_hash when it has Structs)
-     and serialize that -- reusing the hash path above. No object-format
-     knowledge lives here or in the compiler; only the generic reflection. */
-  /* a user class's own #to_json wins, as it does in CRuby's json */
+  /* An object serializes the way CRuby's json does, and CRuby's json is method
+     dispatch: `require "json"` mixes #to_json into Object and into each core
+     class, and JSON.generate calls it. So a class with its own #to_json wins,
+     and everything else lands on Object#to_json -- which is `to_s.to_json`, a
+     JSON *string*. Struct has no override of its own there (the method's owner
+     for a Struct is the Object module), which is why a Struct reads as
+     "#<struct S x=1>" rather than as its members.
+
+     Spinel reaches the same two answers by a different road, since it has no
+     runtime method table to mix a module into: the user arm is the
+     sp_obj_to_json_fn hook the generated program installs, and the fallback is
+     sp_poly_to_s, which dispatches the class's own #to_s and otherwise renders
+     the default #<Name:0x..>. The observable result is CRuby's for both.
+
+     It used to reflect an object into a hash of its members here instead, so
+     JSON.generate(Struct.new(:x).new(1)) answered {"x":1} where CRuby answers
+     "#<struct S x=1>" -- and a plain object with no reflection answered null,
+     which is not any Ruby's answer (#4387). */
   /* the answer is a Ruby String, appended by its own length: a NUL inside it
      is the user's to keep */
   if (sp_obj_to_json_fn) {
@@ -215,18 +243,9 @@ static void sp_json_val_b(jbuf *b, sp_RbVal v, int depth) {
     const char *uj = sp_obj_to_json_fn(v);
     if (uj) { jb_gcs(b, uj, (size_t)sp_str_byte_len(uj)); return; }
   }
-  if (sp_obj_to_hash_fn) {
-    /* The reflected hash is fresh, and the walk below allocates a GC string for
-       every key it reaches and for every numeric, string or symbol scalar (true,
-       false and nil are rodata), so it has to be rooted for the walk: a C
-       argument slot is not a root, and the first collection under it leaves the
-       walk reading freed members. Same reason sp_json_parse roots its input. */
-    sp_RbVal h = sp_obj_to_hash_fn(v);
-    SP_GC_ROOT_RBVAL(h);
-    sp_json_val_b(b, h, depth);
-    return;
-  }
-  jb_add(b, "null", 4);
+  { jb_to_heap(b);   /* the class's own #to_s can raise or allocate */
+    const char *js = sp_json_str(sp_json_obj_to_s(v));
+    jb_gcs(b, js, (size_t)sp_str_byte_len(js)); }
 }
 
 /* ---------- JSON.pretty_generate ----------
@@ -290,13 +309,12 @@ static void sp_json_pretty_val(jbuf *b, sp_RbVal v, int depth) {
         return;
       }
     }
-    if (sp_obj_to_hash_fn) {
-      sp_RbVal h = sp_obj_to_hash_fn(v);
-      SP_GC_ROOT_RBVAL(h);
-      sp_json_pretty_val(b, h, depth);
-      return;
-    }
-    jb_add(b, "null", 4);
+    /* Same fallback as the flat walk: Object#to_json is to_s.to_json, and a
+       JSON string has no interior structure for the pretty printer to lay out,
+       so it renders identically either way. */
+    { jb_to_heap(b);
+      const char *js = sp_json_str(sp_json_obj_to_s(v));
+      jb_gcs(b, js, (size_t)sp_str_byte_len(js)); }
     return;
   }
   { const char *sc = sp_json_val(v); jb_gcs(b, sc, strlen(sc)); }
