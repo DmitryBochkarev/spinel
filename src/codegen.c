@@ -4183,7 +4183,11 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
       if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i]))
         buf_printf(g_pre, "_t%d->c_%s = ((%s *)_cap)->c_%s;\n", tc, caps.v[i], g_cap_struct, caps.v[i]);
       else if (lv && lv->is_cell)
-        buf_printf(g_pre, "_t%d->c_%s = _cell_%s;\n", tc, caps.v[i], caps.v[i]);   /* the shared cell pointer */
+        /* rename_local, like the lv_ arm below: an INLINED callee's locals are
+           renamed (`only` -> `_y1234_only`) and the cell is DECLARED under the
+           renamed name by emit_scope_decls, so capturing under the source name
+           emits a reference to an identifier that does not exist. */
+        buf_printf(g_pre, "_t%d->c_%s = _cell_%s;\n", tc, caps.v[i], rename_local(caps.v[i]));   /* the shared cell pointer */
       else
         buf_printf(g_pre, "_t%d->c_%s = lv_%s;\n", tc, caps.v[i], rename_local(caps.v[i]));
     }
@@ -5419,7 +5423,8 @@ else if (orecv >= 0 && onm) {
         if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i]))
           buf_printf(g_pre, "_capv_%d->c_%s = ((%s *)_cap)->c_%s;\n", pid, caps.v[i], g_cap_struct, caps.v[i]);
         else
-          buf_printf(g_pre, "_capv_%d->c_%s = _cell_%s;\n", pid, caps.v[i], caps.v[i]);
+          /* rename_local for the same reason as the sibling site above. */
+          buf_printf(g_pre, "_capv_%d->c_%s = _cell_%s;\n", pid, caps.v[i], rename_local(caps.v[i]));
       }
       /* Capture the enclosing instance self: by value for a value-type class
          (deref if the enclosing method holds self as a pointer, e.g. an
