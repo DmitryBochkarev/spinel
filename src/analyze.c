@@ -9119,7 +9119,7 @@ static void compute_byref_out_params(Compiler *c) {
         if (pi >= 0 && pi < 32 && !(blocked[si] & (1u << pi))) {
           LocalVar *p = scope_local(s, vn);
           if (p && p->is_param && p->type == TY_STRING && !p->is_cell &&
-              !p->rbs_seeded && !p->is_block_param && !p->byref_out) {
+              !p->is_block_param && !p->byref_out) {
             p->byref_out = 1;
             p->is_cell = 1;   /* body reads/writes ride the cell deref forms */
             changed = 1;
@@ -9145,7 +9145,7 @@ static void compute_byref_out_params(Compiler *c) {
           if (pi < 0 || pi >= 32 || (blocked[si] & (1u << pi))) continue;
           LocalVar *p = scope_local(s, vn);
           if (p && p->is_param && p->type == TY_STRING && !p->is_cell &&
-              !p->rbs_seeded && !p->is_block_param && !p->byref_out) {
+              !p->is_block_param && !p->byref_out) {
             p->byref_out = 1;
             p->is_cell = 1;
             changed = 1;
