@@ -2428,6 +2428,12 @@ void sp_CondVar_broadcast(sp_condvar *cv) { SCHED_LOCK(); while (sp_sched_wake_o
    source-location segment CRuby inserts is not carried) (#2977). */
 const char *sp_Thread_inspect(sp_thread *t) {
   extern const char *sp_sprintf(const char *fmt, ...);
+  /* NULL is this type's nil, and nil inspects as "nil". Without this a
+     `Thread#join(limit)` that TIMED OUT -- which answers NULL, correctly --
+     printed `#<Thread:0x0000000000000000 dead>`, so the one thing the return
+     value is there to tell you read as the opposite of what it said (#4394).
+     The status word compounded it: the thread it named was still running. */
+  if (!t) return "nil";
   const char *st = "dead";
   if (t) {
     switch (t->state) {
