@@ -1,0 +1,26 @@
+["<root>/a/b/c"]
+true
+1
+2
+true
+true
+"hello"
+"hello"
+true
+false
+"hello"
+false
+true
+0
+false
+raised
+rm_f quiet
+"hello"
+true
+false
+rm_rf quiet
+false
+"still here"
+"600"
+true
+false
