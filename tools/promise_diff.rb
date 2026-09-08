@@ -14,7 +14,7 @@
 # Five places hold it, and all five are readable from git alone -- no build, so
 # this runs over any range, including ones already in the past:
 #
-#   1. test/*.rb.expected   an answer a test pins
+#   1. test/ and packages/*/test/ *.expected   an answer a test pins
 #   2. tools/rubyspec/expectations/*.tsv   the PASS rows the retention gate keeps
 #   3. docs/limitations.md  the catalogue of what spinel deliberately does not do
 #   4. tools/spin.rb        the spin.toml fields a manifest may set
@@ -77,7 +77,12 @@ def pinned_answers(from, to)
   added = []
   gone = []
   extended = []
-  sh("git diff --name-status #{from} #{to} -- 'test/*.expected'").to_s.each_line do |ln|
+  # Both trees: a bundled package's tests joined the compiler gate deliberately
+  # (b8e9a198 -- "a compiler change that breaks one must fail here, not at
+  # package-publish time"), so their expectations are the compiler's promises
+  # too. Looking only at test/ missed 51 of them, and missed the first real
+  # break this tool was asked about (#4387).
+  sh("git diff --name-status #{from} #{to} -- 'test/*.expected' 'packages/*/test/*.expected'").to_s.each_line do |ln|
     st, path = ln.strip.split("\t", 2)
     next if path.nil?
     case st[0]
