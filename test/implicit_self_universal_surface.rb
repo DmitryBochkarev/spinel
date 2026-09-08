@@ -52,6 +52,30 @@ p 1.described
 p "s".described
 p Foo.new.described
 
+# The names AN_POLY_RAW cannot carry, because their answer is not a raw C
+# scalar: each is checked against the explicit `self.` form beside it, so a name
+# that stops being answered fails here rather than going quiet.
+class Surface
+  def initialize; @n = 5; end
+  def probe = [itself.equal?(self.itself), dup.class == self.dup.class,
+               clone.class == self.clone.class,
+               instance_variables == self.instance_variables,
+               instance_variable_get(:@n) == self.instance_variable_get(:@n)]
+end
+p Surface.new.probe
+
+# The bare Kernel surface is NOT receiver-transparent, so the redirect must not
+# reach it: `raise` rewritten to `self.raise` is a NoMethodError. This is the
+# shape that caught a list-free version of the pass.
+class Abstract
+  def area = raise("abstract")
+end
+begin
+  Abstract.new.area
+rescue RuntimeError => e
+  p ["raise still raises", e.message]
+end
+
 # a name nothing answers keeps CRuby's wording, and its class. `to_i` is in the
 # universal table -- a poly receiver holding a String answers it -- but a plain
 # object does not, so the redirect must not turn its diagnosis into a

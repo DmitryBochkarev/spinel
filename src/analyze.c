@@ -2188,10 +2188,31 @@ static int give_native_self_calls_a_receiver(Compiler *c) {
    A method the class itself defines wins, as does a top-level def of the same
    name -- both bind ahead of Object's. */
 static int give_self_predicates_a_receiver(Compiler *c) {
+  /* What AN_POLY_RAW cannot carry: it states what a receiver answers as a RAW
+     C scalar, so a name whose answer is a String (the renderers), an object
+     (`dup`, `itself`), or self (`freeze`, `tap`) has no row there and is named
+     here instead. Every one of these is verified against an explicit `self.`
+     receiver by test/implicit_self_universal_surface.rb, so a name that stops
+     being answered fails there rather than going quiet.
+
+     Only names that were actually refused. `freeze` and `respond_to?` already
+     answered an implicit self by another route, and naming them here moved
+     them onto this one -- which widened an ivar from sp_int to sp_RbVal in
+     test/respond_to_implicit_self.rb. A redirect that changes the route of a
+     call that already worked is a cost with no benefit.
+
+     Not everything receiver-less can join this: the bare Kernel surface is NOT
+     receiver-transparent. `raise "x"` inside a method compiles to the raise;
+     rewritten to `self.raise("x")` it becomes a NoMethodError, which is what a
+     list-free version of this pass did to 226 test programs. The sweep is what
+     caught it -- a probe that wrapped the call in `rescue` had reported it
+     working. */
   static const struct { const char *name; int argc; } preds[] = {
     { "is_a?", 1 }, { "kind_of?", 1 }, { "instance_of?", 1 },
-    /* answered as a String, so POLY_RAW (raw C scalars) does not carry them */
     { "to_s", 0 }, { "inspect", 0 },
+    { "itself", 0 }, { "dup", 0 }, { "clone", 0 }, { "tap", 0 },
+    { "display", 0 }, { "instance_variables", 0 },
+    { "instance_variable_get", 1 }, { "instance_variable_set", 2 },
   };
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0;
