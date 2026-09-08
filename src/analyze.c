@@ -2169,13 +2169,29 @@ static int give_native_self_calls_a_receiver(Compiler *c) {
    which is how Rails spells single-table inheritance, and how anyone spells a
    type predicate on self. Give it the receiver it means (#4142).
 
-   Deliberately a short list: only predicates that are Object's and have no
-   sensible meaning as a bare call. A method the class itself defines wins, as
-   does a top-level def of the same name -- both bind ahead of Object's. */
+   The list was deliberately short at first -- only predicates that are
+   Object's and have no sensible meaning as a bare call -- and being short is
+   what brought it back: `to_s`, `inspect`, `hash`, `dup`, `itself` and
+   `object_id` on an implicit self were all still the NameError, in EVERY
+   class, so `def label = "x: " + to_s` did not compile anywhere (#4387). A
+   hand-kept list of what an object answers goes stale exactly this way; the
+   note on POLY_RAW in analyze_infer.c says so about its own twin, and this is
+   the second time here.
+
+   So the names come from that table rather than from a list of their own. It
+   is the compiler's statement of what a receiver answers universally, every
+   consumer already reads it, and a name added there is answered here without
+   anyone remembering to. What stays local is the part POLY_RAW cannot know:
+   the two arg-taking type predicates, and the renderers whose answer is a
+   String rather than a raw scalar.
+
+   A method the class itself defines wins, as does a top-level def of the same
+   name -- both bind ahead of Object's. */
 static int give_self_predicates_a_receiver(Compiler *c) {
   static const struct { const char *name; int argc; } preds[] = {
     { "is_a?", 1 }, { "kind_of?", 1 }, { "instance_of?", 1 },
-    { "nil?", 0 }, { "frozen?", 0 },
+    /* answered as a String, so POLY_RAW (raw C scalars) does not carry them */
+    { "to_s", 0 }, { "inspect", 0 },
   };
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0;
@@ -2187,6 +2203,7 @@ static int give_self_predicates_a_receiver(Compiler *c) {
     int want = -1;
     for (size_t k = 0; k < sizeof preds / sizeof preds[0]; k++)
       if (sp_streq(nm, preds[k].name)) { want = preds[k].argc; break; }
+    if (want < 0) want = an_poly_raw_argc(nm);   /* the universal table decides the rest */
     if (want < 0) continue;
     Scope *osc = comp_scope_of(c, id);
     int ocid = osc ? osc->class_id : -1;

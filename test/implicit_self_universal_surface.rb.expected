@@ -1,0 +1,12 @@
+"x: String"
+"String"
+true
+true
+[false, false]
+42
+"BAR-OWN"
+"<String>"
+"<String>"
+"<String>"
+["NameError", "undefined local variable or method 'nosuchname' for an instance of Typo"]
+["NameError", "undefined local variable or method 'to_i' for an instance of Typo"]

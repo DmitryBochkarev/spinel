@@ -13340,7 +13340,14 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
      parens) is CRuby's *runtime* NameError, so a surrounding rescue must be
      able to catch it -- aborting the build here makes that unwritable (#3037).
      The same gate switch that governs unresolved calls covers this. */
-  if (recv < 0 && nt_int(nt, id, "vcall", 0) && nt_ref(nt, id, "block") < 0 &&
+  /* The redirect in analyze.c gives an implicit-self call the receiver it means
+     (`to_s` -> `self.to_s`), which is what lets the universal surface answer at
+     all. When the receiver turns out NOT to answer -- a name the table carries
+     for some other runtime type, or a plain typo -- the diagnosis is still the
+     one CRuby gives for a bare identifier, so the vcall flag the node still
+     carries keeps that wording rather than falling to the method-call form. */
+  if ((recv < 0 || (nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "SelfNode"))) &&
+      nt_int(nt, id, "vcall", 0) && nt_ref(nt, id, "block") < 0 &&
       g_gate_raise) {
     int vac = 0; call_args(nt, id, &vac);
     if (vac == 0) {

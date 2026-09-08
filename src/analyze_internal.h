@@ -75,6 +75,11 @@ int builtin_class_id(const char *name);
 int builtin_object_method_known(const char *m);
 int class_inherits_builtin_exception(Compiler *c, int ci);
 int an_user_defines_or_reads(Compiler *c, const char *name);
+/* The universal "what a receiver answers" table (analyze_infer.c) and the
+   lookup its consumers use. See the note on AN_POLY_RAW. */
+struct an_poly_raw_row { const char *n; int ac; TyKind t; };
+extern const struct an_poly_raw_row AN_POLY_RAW[];
+int an_poly_raw_argc(const char *name);
 /* 1 when a user class defines `name` as an instance method whose return is not
    `want`: the poly dispatch accumulates its arm beside the builtin ones in one
    C temp, so the call must be typed for what both can hold. */

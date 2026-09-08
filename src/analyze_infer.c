@@ -31,6 +31,36 @@ static int g_face_node = -1;
 static TyKind g_face_kind = TY_UNKNOWN;
 void an_set_face_node(int node, TyKind kind) { g_face_node = node; g_face_kind = kind; }
 int an_face_node(void) { return g_face_node; }
+
+/* What a receiver answers universally, as a RAW C scalar, with the type it
+   answers. ONE table: the inference below reads it, and so does the
+   implicit-self redirect in analyze.c, through an_poly_raw_argc. A second
+   hand-kept copy of "what an object answers" goes stale -- the safe-navigation
+   emitter carried one and it did (#4070 follow-up: `begin`, `end`, `count` and
+   `bytes` missing, `infinite?` with the wrong type), and the redirect's own
+   short list did too (#4387). Add a name here and every consumer has it. */
+const struct an_poly_raw_row AN_POLY_RAW[] = {
+      { "frozen?", 0, TY_BOOL }, { "nil?", 0, TY_BOOL }, { "zero?", 0, TY_BOOL },
+      { "positive?", 0, TY_BOOL }, { "negative?", 0, TY_BOOL },
+      { "even?", 0, TY_BOOL }, { "odd?", 0, TY_BOOL }, { "nan?", 0, TY_BOOL },
+      { "finite?", 0, TY_BOOL }, { "integer?", 0, TY_BOOL }, { "empty?", 0, TY_BOOL },
+      { "eql?", 1, TY_BOOL }, { "equal?", 1, TY_BOOL }, { "instance_of?", 1, TY_BOOL },
+      { "bytesize", 0, TY_INT }, { "ord", 0, TY_INT }, { "bit_length", 0, TY_INT },
+      { "numerator", 0, TY_INT }, { "denominator", 0, TY_INT },
+      { "to_i", 0, TY_INT }, { "hash", 0, TY_INT }, { "object_id", 0, TY_INT },
+      { "begin", 0, TY_INT }, { "end", 0, TY_INT }, { "count", 0, TY_INT },
+      { "to_f", 0, TY_FLOAT }, { "to_r", 0, TY_RATIONAL }, { "to_c", 0, TY_COMPLEX },
+      { "class", 0, TY_CLASS }, { "bytes", 0, TY_INT_ARRAY },
+      { NULL, 0, TY_UNKNOWN } };
+
+/* The argument count the universal table answers `name` with, or -1 when the
+   table does not carry it. */
+int an_poly_raw_argc(const char *name) {
+  for (int q = 0; AN_POLY_RAW[q].n; q++)
+    if (sp_streq(name, AN_POLY_RAW[q].n)) return AN_POLY_RAW[q].ac;
+  return -1;
+}
+
 TyKind an_face_kind(void) { return g_face_kind; }
 #define SP_NMEMO_SZ 16384
 static unsigned g_narrow_gen = 1;
@@ -1102,21 +1132,8 @@ static TyKind infer_call_inner(Compiler *c, int id) {
      guarded its table: a user class owning the name answers for itself. */
   if (recv >= 0 && nt_ref(nt, id, "block") < 0 && !an_user_defines_or_reads(c, name) &&
       infer_type(c, recv) == TY_POLY) {
-    static const struct { const char *n; int ac; TyKind t; } POLY_RAW[] = {
-      { "frozen?", 0, TY_BOOL }, { "nil?", 0, TY_BOOL }, { "zero?", 0, TY_BOOL },
-      { "positive?", 0, TY_BOOL }, { "negative?", 0, TY_BOOL },
-      { "even?", 0, TY_BOOL }, { "odd?", 0, TY_BOOL }, { "nan?", 0, TY_BOOL },
-      { "finite?", 0, TY_BOOL }, { "integer?", 0, TY_BOOL }, { "empty?", 0, TY_BOOL },
-      { "eql?", 1, TY_BOOL }, { "equal?", 1, TY_BOOL }, { "instance_of?", 1, TY_BOOL },
-      { "bytesize", 0, TY_INT }, { "ord", 0, TY_INT }, { "bit_length", 0, TY_INT },
-      { "numerator", 0, TY_INT }, { "denominator", 0, TY_INT },
-      { "to_i", 0, TY_INT }, { "hash", 0, TY_INT }, { "object_id", 0, TY_INT },
-      { "begin", 0, TY_INT }, { "end", 0, TY_INT }, { "count", 0, TY_INT },
-      { "to_f", 0, TY_FLOAT }, { "to_r", 0, TY_RATIONAL }, { "to_c", 0, TY_COMPLEX },
-      { "class", 0, TY_CLASS }, { "bytes", 0, TY_INT_ARRAY },
-      { NULL, 0, TY_UNKNOWN } };
-    for (int q = 0; POLY_RAW[q].n; q++)
-      if (POLY_RAW[q].ac == argc && sp_streq(name, POLY_RAW[q].n)) return POLY_RAW[q].t;
+    for (int q = 0; AN_POLY_RAW[q].n; q++)
+      if (AN_POLY_RAW[q].ac == argc && sp_streq(name, AN_POLY_RAW[q].n)) return AN_POLY_RAW[q].t;
   }
 
   /* A retargeted `x.send(:m)` reaching a top-level def: see the codegen twin. */
