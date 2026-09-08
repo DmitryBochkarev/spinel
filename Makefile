@@ -852,14 +852,16 @@ gc-threshold-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	bo=$$(first_obj "$$tmp/base.err"); bs=$$(first_str "$$tmp/base.err"); \
 	oo=$$(first_obj "$$tmp/obj.err");  os=$$(first_str "$$tmp/obj.err"); \
 	so=$$(first_obj "$$tmp/str.err");  ss=$$(first_str "$$tmp/str.err"); \
-	[ -n "$$bo" ] && [ -n "$$bs" ] || { echo "gc-threshold-test: FAIL (no trigger line from SPINEL_GC_STATS)"; ok=0; }; \
-	awk -v a="$$oo" 'BEGIN{exit !(a>=100)}' || \
+	for v in "$$bo" "$$bs" "$$oo" "$$os" "$$so" "$$ss"; do \
+	  [ -n "$$v" ] || { echo "gc-threshold-test: FAIL (no trigger line from SPINEL_GC_STATS)"; ok=0; break; }; \
+	done; \
+	awk -v a="$$oo" -v b="$$bo" 'BEGIN{exit !(a > b * 8)}' || \
 	  { echo "gc-threshold-test: FAIL (OBJ_KB did not raise the object trigger: $$bo -> $$oo)"; ok=0; }; \
-	awk -v a="$$os" 'BEGIN{exit !(a<5)}' || \
+	awk -v a="$$os" -v b="$$bs" 'BEGIN{exit !(a < b * 4)}' || \
 	  { echo "gc-threshold-test: FAIL (OBJ_KB moved the string trigger too: $$bs -> $$os)"; ok=0; }; \
-	awk -v a="$$ss" 'BEGIN{exit !(a>=10)}' || \
+	awk -v a="$$ss" -v b="$$bs" 'BEGIN{exit !(a > b * 8)}' || \
 	  { echo "gc-threshold-test: FAIL (STR_KB did not raise the string trigger: $$bs -> $$ss)"; ok=0; }; \
-	awk -v a="$$so" 'BEGIN{exit !(a<100)}' || \
+	awk -v a="$$so" -v b="$$bo" 'BEGIN{exit !(a < b * 4)}' || \
 	  { echo "gc-threshold-test: FAIL (STR_KB moved the object trigger too: $$bo -> $$so)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-threshold-test: pass"; else exit 1; fi
