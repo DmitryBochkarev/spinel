@@ -8999,6 +8999,19 @@ static int an_str_mutator_name(const char *nm) {
          sp_streq(nm, "[]=") || (l > 1 && nm[l - 1] == '!');
 }
 
+/* ANY method scope with this name, or -1. Byref is decided per NAME GROUP --
+   every method of a name gets the ABI or none does -- so a caller asking
+   "is parameter j byref here" may ask any member and get the group's answer.
+   Asking for the UNIQUE one instead made a second same-named method anywhere
+   in the program silently answer -1, which reads as "not byref" and is how an
+   unused class dropped a callee's appends (#4390). */
+static int an_any_scope_by_name(Compiler *c, const char *nm) {
+  if (!nm) return -1;
+  for (int i = 1; i < c->nscopes; i++)
+    if (c->scopes[i].name && sp_streq(c->scopes[i].name, nm)) return i;
+  return -1;
+}
+
 /* Unique method scope index by name across the program, or -1 (absent or
    defined more than once). Scope 0 is the top level (name NULL). */
 static int an_unique_scope_by_name(Compiler *c, const char *nm) {
@@ -9025,6 +9038,70 @@ int comp_byref_param(Compiler *c, Scope *m, int idx) {
   if (!m || idx < 0 || idx >= m->nparams || !m->pnames[idx]) return 0;
   LocalVar *p = scope_local(m, m->pnames[idx]);
   return p && p->byref_out;
+}
+
+/* Can a call ever arrive at an instance method of this class or module? Only
+   through a value that is one, so a class nobody instantiates -- and that no
+   instantiated class inherits from or includes -- has neither a direct call
+   site nor a poly-dispatch arm. The emitter already knows this shape: it is
+   what marks such a method `__attribute__((unused))`.
+
+   Such a method cannot disagree with a name group about an ABI, because
+   nothing can call it to find out. So it neither constrains the group nor
+   joins it -- which is what lets an UNUSED class stop taking the ABI away
+   from a used one (#4390). Unsure answers 1: giving the group one member too
+   many costs an optimisation, and one too few would hand a poly dispatch two
+   arms with different C signatures. */
+static int an_class_can_be_reached(Compiler *c, int ci) {
+  if (ci < 0 || ci >= c->nclasses) return 1;
+  if (c->classes[ci].instantiated) return 1;
+  for (int j = 0; j < c->nclasses; j++) {
+    if (!c->classes[j].instantiated) continue;
+    for (int k = j; k >= 0; k = c->classes[k].parent)
+      if (k == ci) return 1;
+    /* a module reaches instances through every class that includes it */
+    for (int k = j; k >= 0; k = c->classes[k].parent)
+      for (int m = 0; m < c->classes[k].nincluded_mods; m++)
+        if (c->classes[k].included_mods[m] == ci) return 1;
+  }
+  return 0;
+}
+
+/* Promote parameter `pi` for EVERY method of this name, or for none of them.
+   A call site resolves by name, so every arm a poly dispatch can reach has to
+   agree on the ABI. The old rule stood in for that by refusing any name
+   defined twice -- right about the danger, wrong about the remedy: it also
+   refused two methods that agree perfectly, so adding an UNUSED class with a
+   same-named method took the ABI away from a method that had it and the
+   caller's buffer came back empty (#4390). Agreeing is the thing to require,
+   so require it: every member must be eligible, must have a parameter at that
+   index, must have it typed String, and must not have blocked it by
+   rebinding. One member that cannot take it keeps the value ABI for all. */
+static int an_byref_promote_group(Compiler *c, const char *nm, int pi,
+                                  const char *elig, const unsigned *blocked, int n) {
+  if (!nm || pi < 0 || pi >= 32) return 0;
+  for (int k = 1; k < n; k++) {
+    Scope *m = &c->scopes[k];
+    if (!m->name || !sp_streq(m->name, nm)) continue;
+    if (m->class_id >= 0 && !m->is_cmethod && !an_class_can_be_reached(c, m->class_id)) continue;
+    if (!elig[k]) return 0;
+    if (pi >= m->nparams || !m->pnames[pi]) return 0;
+    if (blocked[k] & (1u << pi)) return 0;
+    LocalVar *q = scope_local(m, m->pnames[pi]);
+    if (!q || !q->is_param || q->is_block_param || q->type != TY_STRING) return 0;
+    /* celled for another reason (a closure capture) is not a slot the caller
+       can lend; celled because it is already byref is this group, mid-fixpoint */
+    if (q->is_cell && !q->byref_out) return 0;
+  }
+  int did = 0;
+  for (int k = 1; k < n; k++) {
+    Scope *m = &c->scopes[k];
+    if (!m->name || !sp_streq(m->name, nm)) continue;
+    if (m->class_id >= 0 && !m->is_cmethod && !an_class_can_be_reached(c, m->class_id)) continue;
+    LocalVar *q = scope_local(m, m->pnames[pi]);
+    if (q && !q->byref_out) { q->byref_out = 1; q->is_cell = 1; did = 1; }
+  }
+  return did;
 }
 
 static void compute_byref_out_params(Compiler *c) {
@@ -9055,7 +9132,6 @@ static void compute_byref_out_params(Compiler *c) {
       int kn = 0; nt_arr(nt, pn, "keywords", &kn);
       if (kn > 0) continue;
     }
-    if (an_unique_scope_by_name(c, s->name) != si) continue;
     elig[si] = 1;
   }
   /* an aliased name reaches the method under another spelling; the alias call
@@ -9118,19 +9194,18 @@ static void compute_byref_out_params(Compiler *c) {
         int pi = an_param_idx(s, vn);
         if (pi >= 0 && pi < 32 && !(blocked[si] & (1u << pi))) {
           LocalVar *p = scope_local(s, vn);
-          if (p && p->is_param && p->type == TY_STRING && !p->is_cell &&
-              !p->is_block_param && !p->byref_out) {
-            p->byref_out = 1;
-            p->is_cell = 1;   /* body reads/writes ride the cell deref forms */
+          /* the whole name group takes it or none of it does; the cell deref
+             forms the body already emits are what the ABI rides on */
+          if (p && p->is_param && p->type == TY_STRING && !p->byref_out &&
+              an_byref_promote_group(c, s->name, pi, elig, blocked, n))
             changed = 1;
-          }
         }
       }
       /* transitive: the param passed on into another method's byref slot */
       if (recv < 0 || (rty && (sp_streq(rty, "ConstantReadNode") ||
                                sp_streq(rty, "ConstantPathNode") ||
                                sp_streq(rty, "SelfNode")))) {
-        int mi = an_unique_scope_by_name(c, nm);
+        int mi = an_any_scope_by_name(c, nm);
         if (mi < 0) continue;
         Scope *m = &c->scopes[mi];
         int argsN = nt_ref(nt, id, "arguments");
@@ -9144,12 +9219,9 @@ static void compute_byref_out_params(Compiler *c) {
           int pi = an_param_idx(s, vn);
           if (pi < 0 || pi >= 32 || (blocked[si] & (1u << pi))) continue;
           LocalVar *p = scope_local(s, vn);
-          if (p && p->is_param && p->type == TY_STRING && !p->is_cell &&
-              !p->is_block_param && !p->byref_out) {
-            p->byref_out = 1;
-            p->is_cell = 1;
+          if (p && p->is_param && p->type == TY_STRING && !p->byref_out &&
+              an_byref_promote_group(c, s->name, pi, elig, blocked, n))
             changed = 1;
-          }
         }
       }
     }
@@ -9757,7 +9829,8 @@ static int strbuf_slot_eligible_shape(Compiler *c, const char *vn, Scope *vs, Lo
     const char *uty = nt_type(nt, u);
     if (!uty || !sp_streq(uty, "CallNode")) continue;
     if (comp_scope_of(c, u) != vs) continue;
-    int mi = an_unique_scope_by_name(c, nt_str(nt, u, "name"));
+    /* the group's answer, not the unique one: see an_any_scope_by_name */
+    int mi = an_any_scope_by_name(c, nt_str(nt, u, "name"));
     if (mi < 0) continue;
     int argsN = nt_ref(nt, u, "arguments");
     int uargc = 0;
@@ -14540,7 +14613,8 @@ void analyze_program(Compiler *c) {
       const char *uty = nt_type(c->nt, u);
       if (!uty || !sp_streq(uty, "CallNode")) continue;
       if (comp_scope_of(c, u) != s) continue;
-      int mi = an_unique_scope_by_name(c, nt_str(c->nt, u, "name"));
+      /* the group's answer, not the unique one: see an_any_scope_by_name */
+      int mi = an_any_scope_by_name(c, nt_str(c->nt, u, "name"));
       if (mi < 0) continue;
       int argsN = nt_ref(c->nt, u, "arguments");
       int uargc = 0;
