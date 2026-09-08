@@ -697,7 +697,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -834,6 +834,35 @@ gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	  echo "gc-phases-test: FAIL (no [gcph] mark split with the flag set)"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-phases-test: pass"; else exit 1; fi
+
+# The two per-heap collection floors move ONE trigger each, which is the whole
+# point of having them: moving both together cannot say which heap paces the
+# collections (#4384). Read back off SPINEL_GC_STATS, which reports the two
+# separately, so the test asserts the mechanism rather than a timing.
+gc-threshold-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+	@tmp=$$(mktemp -d /tmp/spinel-gcthr.XXXXXX); ok=1; \
+	src=test/gc_threshold_per_heap.rb; \
+	$(SPINEL) "$$src" -o "$$tmp/t" >/dev/null 2>&1 || \
+	  { echo "gc-threshold-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/t" >/dev/null 2> "$$tmp/base.err"; \
+	SPINEL_GC_THRESHOLD_OBJ_KB=16384 SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/t" >/dev/null 2> "$$tmp/obj.err"; \
+	SPINEL_GC_THRESHOLD_STR_KB=16384 SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/t" >/dev/null 2> "$$tmp/str.err"; \
+	first_obj() { sed -n 's/.*trigger \([0-9.]*\) MB obj.*/\1/p' "$$1" | head -1; }; \
+	first_str() { sed -n 's/.*+ \([0-9.]*\) MB str.*/\1/p' "$$1" | head -1; }; \
+	bo=$$(first_obj "$$tmp/base.err"); bs=$$(first_str "$$tmp/base.err"); \
+	oo=$$(first_obj "$$tmp/obj.err");  os=$$(first_str "$$tmp/obj.err"); \
+	so=$$(first_obj "$$tmp/str.err");  ss=$$(first_str "$$tmp/str.err"); \
+	[ -n "$$bo" ] && [ -n "$$bs" ] || { echo "gc-threshold-test: FAIL (no trigger line from SPINEL_GC_STATS)"; ok=0; }; \
+	awk -v a="$$oo" 'BEGIN{exit !(a>=100)}' || \
+	  { echo "gc-threshold-test: FAIL (OBJ_KB did not raise the object trigger: $$bo -> $$oo)"; ok=0; }; \
+	awk -v a="$$os" 'BEGIN{exit !(a<5)}' || \
+	  { echo "gc-threshold-test: FAIL (OBJ_KB moved the string trigger too: $$bs -> $$os)"; ok=0; }; \
+	awk -v a="$$ss" 'BEGIN{exit !(a>=10)}' || \
+	  { echo "gc-threshold-test: FAIL (STR_KB did not raise the string trigger: $$bs -> $$ss)"; ok=0; }; \
+	awk -v a="$$so" 'BEGIN{exit !(a<100)}' || \
+	  { echo "gc-threshold-test: FAIL (STR_KB moved the object trigger too: $$bo -> $$so)"; ok=0; }; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "gc-threshold-test: pass"; else exit 1; fi
 
 GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_retval.rb \

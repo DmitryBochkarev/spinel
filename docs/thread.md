@@ -123,6 +123,22 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_WORKERS` | number of OS workers; overrides the online-core autodetect (min 1). Read at the first `Thread.new`, so a program can set it itself: `ENV["SPINEL_WORKERS"] = "1"` before spawning caps its own pool, and `... = "1" unless ENV["SPINEL_WORKERS"]` declares a default the environment still overrides |
 | `SPINEL_PREEMPT_SIGNAL` | the signal the monitor uses to preempt a busy worker (default `SIGURG`) |
 | `SPINEL_GC_THRESHOLD_KB` | per-worker collection budget; raise it to trade memory for fewer stop-the-world pauses (default 256) |
+| `SPINEL_GC_THRESHOLD_OBJ_KB` | the same budget for the OBJECT heap alone, overriding the pair above |
+| `SPINEL_GC_THRESHOLD_STR_KB` | the same for the STRING heap alone |
+
+The two per-heap variables exist to answer a question the pair cannot. The
+mark walks both live sets, and only one heap's trigger decides when it runs.
+Raising both together speeds the program up without saying which of them was
+pacing it; raising one says. Point `SPINEL_GC_STATS=1` at the result and the
+`trigger` field reports the two separately:
+
+```
+[gc] 19 collections ... trigger 512.0 MB obj + 0.25 MB str/worker
+```
+
+The object figure is the pool-wide budget (the base times the worker count,
+for the reason in the note below); the string figure is per worker, which is
+why the string one is not multiplied.
 
 ### A note on allocation-heavy threads
 

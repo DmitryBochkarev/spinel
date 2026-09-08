@@ -112,6 +112,23 @@ void sp_alloc_stress_init(void) {
 
    Not scaled under GC stress: that mode exists to maximize collections, and
    multiplying its 2 KB budget would quietly weaken every stress run. */
+/* Set one heap's floor from an environment variable, leaving the other alone.
+   SPINEL_GC_THRESHOLD_KB moves both together, and moving them together cannot
+   answer WHICH heap's trigger paces the collections. On a server whose string
+   live set grows 26x across a concurrency ladder while its object live set
+   grows 4.9x, the mark walks both and only one of them decides when to look:
+   raising just the object floor says whether that is the pacer, and raising
+   just the string floor is the same question from the other side (#4384).
+   The per-heap variable wins when both are set, being the more specific. */
+static void sp_alloc_floor_from_env(const char *name, size_t *cur, size_t *init) {
+  const char *e = getenv(name);
+  if (!e || !*e) return;
+  long v = atol(e);
+  if (v <= 0) return;
+  size_t base = (size_t)v * 1024;
+  SP_GC_CTR_SET(*cur, base);
+  *init = base;
+}
 void sp_alloc_worker_tune(int workers) {
   const char *e = getenv("SPINEL_GC_THRESHOLD_KB");
   if (e && *e) {
@@ -122,6 +139,8 @@ void sp_alloc_worker_tune(int workers) {
       SP_GC_CTR_SET(sp_str_threshold, base); sp_str_threshold_init = base;
     }
   }
+  sp_alloc_floor_from_env("SPINEL_GC_THRESHOLD_OBJ_KB", &sp_gc_threshold, &sp_gc_threshold_init);
+  sp_alloc_floor_from_env("SPINEL_GC_THRESHOLD_STR_KB", &sp_str_threshold, &sp_str_threshold_init);
   {
     const char *st = getenv("SPINEL_GC_STRESS");
     if (st && *st && *st != '0') return;
