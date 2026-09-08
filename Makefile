@@ -817,8 +817,10 @@ gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	if [ -s "$$tmp/off.err" ]; then \
 	  echo "gc-phases-test: FAIL (wrote to stderr with the flag unset)"; \
 	  head -3 "$$tmp/off.err"; ok=0; fi; \
-	if ! grep -q '^\[gcph\]' "$$tmp/on.err"; then \
-	  echo "gc-phases-test: FAIL (no [gcph] line with the flag set)"; ok=0; fi; \
+	if ! grep -q '^\[gcph\] mark ' "$$tmp/on.err"; then \
+	  echo "gc-phases-test: FAIL (no [gcph] phase line with the flag set)"; ok=0; fi; \
+	if ! grep -q '^\[gcph\] mark: ' "$$tmp/on.err"; then \
+	  echo "gc-phases-test: FAIL (no [gcph] mark split with the flag set)"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-phases-test: pass"; else exit 1; fi
 

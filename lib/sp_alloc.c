@@ -221,6 +221,17 @@ static void sp_gc_stats_emit(void) {
           sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
           sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim,
           sp_gc_stat_seconds);
+  /* The mark, one level down, because "mark grew" has two causes that want
+     different answers: more ROOTS to scan and more GRAPH to trace. `fibers` is
+     every live fiber's saved roots, walked serially, and it grows with the
+     number of in-flight fibers rather than with the worker count; `scan` is the
+     trace that drains what the roots found, and it grows because those fibers
+     hold live objects. Only the first is what handing the fiber list to the
+     parked workers would address (#4384). The four sum to `mark` above. */
+  fprintf(stderr,
+          "[gcph] mark: roots %.3fs  fibers %.3fs  globals %.3fs  scan %.3fs\n",
+          sp_gc_ph_mk_roots, sp_gc_ph_mk_fibers,
+          sp_gc_ph_mk_globals, sp_gc_ph_mk_scan);
 }
 
 void sp_gc_retune_object(size_t before) {

@@ -296,6 +296,18 @@ extern unsigned sp_gc_verify_probe;
    between them. Reported by sp_alloc.c, which is where the stats line lives. */
 extern double sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
               sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim;
+/* The mark, split the way sp_gc_mark_all walks: this worker's own root stack,
+   every live fiber's saved roots, the globals hook, then the trace that drains
+   what those three found. Named as sp_gc_dbg_phase names them under verify, so
+   a number leads to the code. They sum to sp_gc_ph_mark.
+
+   The split exists because "mark grew" has two causes that need different
+   answers: more ROOTS to scan (the fibers row, which grows with in-flight
+   fibers) and more GRAPH to trace (the scan row, which grows because those
+   fibers hold live objects). Only the first is what slicing the fiber list to
+   the parked workers would address (#4384). */
+extern double sp_gc_ph_mk_roots, sp_gc_ph_mk_fibers,
+              sp_gc_ph_mk_globals, sp_gc_ph_mk_scan;
 extern int sp_gc_ph_on;
 void sp_gc_collect(void);
 #ifdef SP_THREADS

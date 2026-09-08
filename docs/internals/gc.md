@@ -196,7 +196,7 @@ Environment variables:
 |-----------------------|------------------------------------------------------------------------|
 | `SPINEL_GC_STRESS`    | drops the thresholds to 2048 B, so nearly every allocation collects     |
 | `SPINEL_GC_VERIFY`    | registry check on every mark, plus a SIGSEGV/SIGBUS reporter naming the phase and object |
-| `SPINEL_GC_PHASES`    | adds a `[gcph]` line splitting collector time into mark / old sweep / slot sweep / remembered clear / string sweep / trim, named as the collector's own comments name them; arms the reporter on its own |
+| `SPINEL_GC_PHASES`    | adds two `[gcph]` lines: collector time split into mark / old sweep / slot sweep / remembered clear / string sweep / trim, and the mark split again into roots / fibers / globals / scan. Named as the collector's own comments and `sp_gc_dbg_phase` name them; arms the reporter on its own |
 | `SPINEL_GC_MINOR`     | generational MARK: a non-full cycle walks the young objects and the remembered set instead of the whole live graph. Opt-in; see below |
 | `SPINEL_MAX_HEAP_MB`  | RSS ceiling, checked at GC trigger points against `/proc/self/statm`; Linux only, off by default |
 
@@ -231,9 +231,26 @@ fiber's saved roots are walked serially by `sp_mark_suspended_fibers` -- so on
 a server it grows with concurrency: mark went 0.317 -> 0.812 ms/request from
 4 to 64 connections with the worker count held fixed, while slot sweep stayed
 flat (#4384). A terminated fiber already costs nothing there (its snapshot is
-dropped at termination, since it points into unwound frames). Slicing the fiber
-list to the parked workers is the obvious lever and is not a small change:
-`sp_gc_mark` writes `h->marked` and pushes a shared mark stack.
+dropped at termination, since it points into unwound frames).
+
+Before slicing the fiber list to the parked workers, read the mark split that
+`SPINEL_GC_PHASES` prints, because "mark grew" has two causes and they want
+different answers. `fibers` is the serial walk of every live fiber's saved
+roots -- that is what slicing would parallelize. `scan` is the trace that
+drains what the roots found, and it grows for a different reason: those fibers
+hold live objects, so there is more graph. On a synthetic with the worker count
+held fixed and only the number of parked deep fibers varied, `fibers` went
+0.000s -> 0.006s from 1 to 128 while `scan` went 0.006s -> 0.006s at 32 and
+only then began to move -- so at low fiber counts the split is almost all
+trace, and slicing would buy nothing.
+
+What the slicing itself costs is smaller than it first looks. `h->marked` is
+written with the same value by any worker, and a racing check-then-set costs at
+most scanning one object twice, which is idempotent -- it is not a correctness
+barrier. The shared mutable state is the mark stack alone (`sp_gc_mark_stack`,
+`sp_gc_mark_top`, and its realloc growth), so per-worker stacks or an atomic
+top without realloc is the shape. Parallelizing the `scan` phase as well needs
+work stealing, which is a different size of change.
 
 Also absent:
 

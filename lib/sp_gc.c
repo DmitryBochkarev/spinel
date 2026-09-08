@@ -209,8 +209,26 @@ void sp_gc_mark_drain(void){
     if(sp_gc_verify){sp_gc_dbg_phase="scan";sp_gc_dbg_ctx=obj;}
     if(h->scan)h->scan(obj);}
 }
-void sp_gc_mark_all(void){if(!sp_gc_mark_stack){sp_gc_mark_stack=(void**)malloc(sizeof(void*)*SP_GC_MARK_STACK_MAX);if(sp_gc_mark_stack)sp_gc_mark_cap=SP_GC_MARK_STACK_MAX;}sp_gc_mark_top=0;if(sp_gc_verify)sp_gc_verify_snapshot();int vd=sp_gc_verify;for(int i=0;i<sp_gc_nroots;i++){void**e=sp_gc_roots[i];if(vd){sp_gc_dbg_phase="root";sp_gc_dbg_ctx=(void*)e;}if((uintptr_t)e&(uintptr_t)3){sp_gc_mark_root_entry(e);}
-else{void*obj=*e;if(obj)sp_gc_mark(obj);}}if(vd)sp_gc_dbg_phase="fibers";if(sp_gc_mark_suspended_fibers_hook)sp_gc_mark_suspended_fibers_hook();if(vd)sp_gc_dbg_phase="globals";if(sp_gc_mark_globals_hook)sp_gc_mark_globals_hook();sp_gc_mark_drain();if(vd){sp_gc_dbg_phase="?";sp_gc_dbg_ctx=NULL;}}
+/* sp_gc_stat_now is defined with the rest of the phase clock, below: the split
+   here is the same measurement, taken one level down. */
+static double sp_gc_stat_now(void);
+/* Close the mark sub-phase that ended here. Same shape and same cost as
+   SP_GC_PH in sp_gc_collect: off by default, one not-taken branch per
+   boundary, four of them per collection. */
+#define SP_GC_MK_PH(bucket)   do { if (sp_gc_ph_on) { double _t = sp_gc_stat_now(); (bucket) += _t - mk_t; mk_t = _t; } } while (0)
+
+void sp_gc_mark_all(void){if(!sp_gc_mark_stack){sp_gc_mark_stack=(void**)malloc(sizeof(void*)*SP_GC_MARK_STACK_MAX);if(sp_gc_mark_stack)sp_gc_mark_cap=SP_GC_MARK_STACK_MAX;}sp_gc_mark_top=0;if(sp_gc_verify)sp_gc_verify_snapshot();int vd=sp_gc_verify;
+  double mk_t = sp_gc_ph_on ? sp_gc_stat_now() : 0.0;
+  for(int i=0;i<sp_gc_nroots;i++){void**e=sp_gc_roots[i];if(vd){sp_gc_dbg_phase="root";sp_gc_dbg_ctx=(void*)e;}if((uintptr_t)e&(uintptr_t)3){sp_gc_mark_root_entry(e);}
+else{void*obj=*e;if(obj)sp_gc_mark(obj);}}
+  SP_GC_MK_PH(sp_gc_ph_mk_roots);
+  if(vd)sp_gc_dbg_phase="fibers";if(sp_gc_mark_suspended_fibers_hook)sp_gc_mark_suspended_fibers_hook();
+  SP_GC_MK_PH(sp_gc_ph_mk_fibers);
+  if(vd)sp_gc_dbg_phase="globals";if(sp_gc_mark_globals_hook)sp_gc_mark_globals_hook();
+  SP_GC_MK_PH(sp_gc_ph_mk_globals);
+  sp_gc_mark_drain();
+  SP_GC_MK_PH(sp_gc_ph_mk_scan);
+  if(vd){sp_gc_dbg_phase="?";sp_gc_dbg_ctx=NULL;}}
 
 unsigned sp_gc_mark_gen = 0;
 /* Set for the duration of a minor mark: an object already promoted is not
@@ -433,6 +451,8 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
    total. That is what this found, and #4380 then removed; it reads ~0 now. */
 double sp_gc_ph_mark = 0, sp_gc_ph_oldsweep = 0, sp_gc_ph_slotsweep = 0,
        sp_gc_ph_rembclear = 0, sp_gc_ph_strsweep = 0, sp_gc_ph_trim = 0;
+double sp_gc_ph_mk_roots = 0, sp_gc_ph_mk_fibers = 0,
+       sp_gc_ph_mk_globals = 0, sp_gc_ph_mk_scan = 0;
 int sp_gc_ph_on = 0;
 unsigned long long sp_gc_stat_collections=0;
 unsigned long long sp_gc_stat_fulls=0;
