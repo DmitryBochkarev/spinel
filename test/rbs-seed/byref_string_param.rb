@@ -13,12 +13,24 @@ module Views
   end
 end
 
+# Forwards its buffer and never appends to it itself, so its parameter can
+# only reach byref through the TRANSITIVE arm -- the second site the seed
+# exclusion sat on.
+module Views
+  module Body
+    def self.frags_into(io)
+      Views::Parts.frag_into(io, 1)
+      Views::Parts.frag_into(io, 2)
+      nil
+    end
+  end
+end
+
 module Views
   module Page
     def self.show_into(io)
       io << "<html>"
-      Views::Parts.frag_into(io, 1)
-      Views::Parts.frag_into(io, 2)
+      Views::Body.frags_into(io)
       io << "</html>"
       nil
     end
