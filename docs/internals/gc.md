@@ -91,9 +91,13 @@ they pass against the broken build.
 
 ## Marking
 
-The mark phase is **always full**. `sp_gc_mark_all` walks every root every
-cycle. Only the *sweep* is generational -- a distinction worth stating plainly,
-because "generational GC" usually implies the opposite.
+The mark phase is **full by default**. `sp_gc_mark_all` walks every root every
+cycle, and only the *sweep* is generational -- a distinction worth stating
+plainly, because "generational GC" usually implies the opposite.
+
+`SPINEL_GC_MINOR=1` makes the mark generational too, through the write barrier
+and the remembered set. It is opt-in, for a measured reason rather than a
+doubtful one; see "The generational mark, and why it is opt-in" below.
 
 Marks are a 30-bit generation stamp (`sp_gc_mark_gen`), so a new cycle unmarks
 the whole heap without touching a single object. On the (rare) wrap the heap is
@@ -193,16 +197,43 @@ Environment variables:
 | `SPINEL_GC_STRESS`    | drops the thresholds to 2048 B, so nearly every allocation collects     |
 | `SPINEL_GC_VERIFY`    | registry check on every mark, plus a SIGSEGV/SIGBUS reporter naming the phase and object |
 | `SPINEL_GC_PHASES`    | adds a `[gcph]` line splitting collector time into mark / old sweep / slot sweep / remembered clear / string sweep / trim, named as the collector's own comments name them; arms the reporter on its own |
+| `SPINEL_GC_MINOR`     | generational MARK: a non-full cycle walks the young objects and the remembered set instead of the whole live graph. Opt-in; see below |
 | `SPINEL_MAX_HEAP_MB`  | RSS ceiling, checked at GC trigger points against `/proc/self/statm`; Linux only, off by default |
+
+## The generational mark, and why it is opt-in
+
+There **is** a write barrier now, and `SPINEL_GC_MINOR=1` turns on the mark
+that uses it: `sp_gc_wb` records an old object that takes a young reference,
+and a non-full cycle marks from the roots plus that remembered set rather than
+tracing the whole live graph. It is off by default, and the reason is a
+measured trade rather than doubt about the code:
+
+- it wins where the retained heap is **large and stable** -- a 440 MB live
+  object set here is ~5% faster with 4% less RSS, and the Campfire port at
+  #4386 measured +4.0% on its room page;
+- it loses where the shape is **churn with a small live set** -- optcarrot is
+  ~2.7% slower, and a 50-program LangArena run in August was 13% slower overall
+  (BWTEncode 4.3x, AStar 2.3x) against 27% less peak RSS.
+
+Default-on was tried once and reverted (01bc08c8). The correctness side has
+moved since: `gc-minor-test` holds one leg per barrier gap that shipped, and
+`SPINEL_GC_VERIFY_GEN=1` names the holder of anything a barrier missed. The
+performance side has not moved, which is why the flag is still a choice an
+application makes rather than a default: an application that retains a lot can
+measure the win and take it.
 
 ## Limits, and where the next work is
 
-**There is no write barrier.** This is the largest structural limit, and the
-reason the mark phase is full while only the sweep is generational: without a
-barrier there is no remembered set, so an old object holding a young one cannot
-be found without tracing everything. A large long-lived heap pays a full mark
-every cycle, and pauses are proportional to the live set rather than to the
-garbage.
+**The mark does not parallelize.** The young sweep is handed to the parked
+workers, one slot each; the mark runs on the collector thread alone. Its cost
+tracks the number of IN-FLIGHT fibers, not the worker count -- every live
+fiber's saved roots are walked serially by `sp_mark_suspended_fibers` -- so on
+a server it grows with concurrency: mark went 0.317 -> 0.812 ms/request from
+4 to 64 connections with the worker count held fixed, while slot sweep stayed
+flat (#4384). A terminated fiber already costs nothing there (its snapshot is
+dropped at termination, since it points into unwound frames). Slicing the fiber
+list to the parked workers is the obvious lever and is not a small change:
+`sp_gc_mark` writes `h->marked` and pushes a shared mark stack.
 
 Also absent:
 
@@ -216,10 +247,11 @@ generational sweep, by contrast, worked (-6% runtime and -25% RSS on one
 benchmark) -- strings are leaves in the object graph, so the reason the nursery
 failed did not apply to them.
 
-The obvious next step is a write barrier, to make the *mark* generational too.
-It is not a small change: the barrier has to sit on every ivar and container
-store, which is the hottest code the compiler emits. Settle how it will be
-measured before writing any of it. The frame-rate figure this project gates on
-is sensitive enough to code layout that a barrier's real cost and an unrelated
-layout accident are easy to mistake for each other, and telling them apart
-after the fact is much harder than setting up the comparison first.
+The write barrier that section used to call the next step now exists (see
+above). The warning it carried is worth keeping, because it turned out to be
+right: the barrier sits on every ivar and container store, which is the hottest
+code the compiler emits, and the frame-rate figure this project gates on is
+sensitive enough to code layout that a real cost and a layout accident are easy
+to mistake for each other. Settle how a change will be measured before writing
+it -- interleave the arms, and prefer flipping an environment variable on ONE
+binary over comparing two builds.
