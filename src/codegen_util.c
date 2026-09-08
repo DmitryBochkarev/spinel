@@ -698,7 +698,34 @@ void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent) {
          block_param_name only covers plain leading params. */
       int is_param = subtree_has_param_named(c->nt, nt_ref(c->nt, blk, "parameters"), tmpn);
 
-      if (!is_param) {
+      if (is_param) {
+        /* A cell_shadow param is bound by the loop emitters WRITING THE PLAIN C
+           SLOT, while every read in the body already goes through the cell. The
+           publish used to sit at the capture fill -- the point the lifted proc
+           is built -- so every read before that read a cell still holding the
+           previous iteration's value, or nil on the first pass. Two nested
+           blocks and a `next` were enough to arrange it: doom's build_composite
+           saw `pref` as nil on the first patch of every texture and drew
+           nothing. The slot is current from the moment the loop writes it, so
+           publish here, at the top of the body, which is where the LocalVar
+           doc has always said the copy belongs. */
+        Scope *psc = comp_scope_of(c, blk);
+        LocalVar *plv = psc ? scope_local(psc, tmpn) : NULL;
+        if (plv && plv->is_cell && plv->cell_shadow) {
+          const char *prn = rename_local(tmpn);
+          /* Inlined inside a real proc function the cell is reachable only
+             through the capture struct, and the slot is not this frame's at
+             all -- there the capture fill is still the only publish. */
+          if (!(g_cap_struct && g_cap_names && nameset_has(g_cap_names, prn))) {
+            emit_indent(b, indent);
+            if (plv->type == TY_PROC)
+              buf_printf(b, "*_cell_%s = (sp_int)(uintptr_t)lv_%s;\n", prn, prn);
+            else
+              buf_printf(b, "*_cell_%s = lv_%s;\n", prn, prn);
+          }
+        }
+      }
+      else {
         Scope *sc = comp_scope_of(c, blk);
         LocalVar *lv = sc ? scope_local(sc, tmpn) : NULL;
         /* A captured (cell-backed) block-local gets a FRESH cell each
