@@ -128,6 +128,43 @@ alloc;(unattributed) 3
 Every row above that line is still exact -- the overflow is kept out of them
 rather than added to whichever row the probe happened to land on.
 
+### While it is still running: a signal
+
+`atexit` is a mode a server cannot use: it is stopped by a signal, so the
+counters it spent the whole run filling are lost at the moment they are worth
+reading. `SIGUSR1` asks for a dump in flight, and the program carries on:
+
+```
+SPINEL_ALLOC_REPORT=alloc.folded ./server &
+kill -USR1 $!          # writes alloc.folded now
+```
+
+Each dump rewrites the whole cumulative table, so a WINDOW is two dumps
+subtracted -- which is also how a server's boot is kept out of the profile:
+
+```
+kill -USR1 $pid; sleep 1; cp alloc.folded before.folded
+#   ... run the work you want to measure ...
+kill -USR1 $pid; sleep 1; cp alloc.folded after.folded
+awk 'NR==FNR{a[$1]=$2; next} /^alloc;/{print $1, $2-a[$1]}' before.folded after.folded
+```
+
+The `# bytes` lines carry their key in the third field rather than the first.
+
+`SPINEL_ALLOC_REPORT_SIGNAL` moves the signal, by number or by name
+(`USR1`, `USR2`, `URG`, `IO`, `WINCH`). Three things worth knowing:
+
+- The handler is installed only while the report is on, but while it is on it
+  replaces whatever the program had for that signal. A `Signal.trap("USR1")`
+  in the program runs later and replaces it back, at which point the dump
+  stops arriving -- move the signal rather than fight over one.
+- A threaded program parks a thread on the signal, so the dump arrives whether
+  or not anything is allocating. A single-threaded one has no such thread: the
+  handler sets a flag and the next allocation writes the report, so an idle
+  single-threaded program dumps when it next allocates.
+- A process that forked after startup has the handler in the child but not the
+  thread; the child falls back to the flag. Signal the parent.
+
 ## Which one to reach for
 
 Start with `--profile` and a sampler: it tells you which method to look at.
