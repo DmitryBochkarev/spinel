@@ -69,8 +69,14 @@ rescue RuntimeError => e
 end
 p seen.closed?
 
-# NOT here, and it did not work before this change either: a non-local
-# `return` from inside the block AT ONE SITE while ANOTHER site of the same
-# method answers a different type. The two together still fail to build.
-# Loudly, which is the difference that matters -- the wrong-value case above
-# is the one that used to pass silently.
+# A non-local `return` from inside the block leaves through the ensure, and
+# does so at a call site whose sibling answers a different type. That last
+# combination needed one more thing: the filler C requires after an
+# unreachable tail was typed by the RETURN's argument, where it is read as
+# the value of the yield's slot.
+def wrapped
+  Handle.open("g") do |x|
+    return "returned #{x.name}"
+  end
+end
+p wrapped

@@ -1251,10 +1251,24 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     int bn2 = 0; const int *bd2 = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn2) : NULL;
     if (bn2 > 0 && nt_type(nt, bd2[bn2 - 1]) &&
         sp_streq(nt_type(nt, bd2[bn2 - 1]), "ReturnNode")) {
-      int ra = nt_ref(nt, bd2[bn2 - 1], "arguments");
-      int rn = 0; const int *rv = ra >= 0 ? nt_arr(nt, ra, "arguments", &rn) : NULL;
-      TyKind rt2 = rn > 0 ? comp_ntype(c, rv[0]) : TY_INT;
-      buf_printf(b, " %s;", default_value(is_scalar_ret(rt2) ? rt2 : TY_INT));
+      /* The filler is read as the value of the statement expression, so the
+         type it has to have is the CONSUMER's -- want_ty -- not the type of
+         the value the unreachable return carries. Taking the return's own put
+         a String literal in a poly yield slot and stopped the build: the two
+         only agree when the block's value and the method's return happen to
+         be the same type, which is the case that had been tried. */
+      TyKind ft = want_ty;
+      if (ft == TY_UNKNOWN || ft == TY_VOID || ft == TY_NIL) {
+        int ra = nt_ref(nt, bd2[bn2 - 1], "arguments");
+        int rn = 0; const int *rv = ra >= 0 ? nt_arr(nt, ra, "arguments", &rn) : NULL;
+        TyKind rt2 = rn > 0 ? comp_ntype(c, rv[0]) : TY_INT;
+        ft = is_scalar_ret(rt2) ? rt2 : TY_INT;
+      }
+      /* a by-value object is a bare struct: default_value's NULL is ill-typed */
+      if (ty_is_object(ft) && comp_ty_value_obj(c, ft))
+        buf_printf(b, " (sp_%s){0};", c->classes[ty_object_class(ft)].c_name);
+      else
+        buf_printf(b, " %s;", default_value(ft));
     }
     buf_puts(b, "})");
   }
