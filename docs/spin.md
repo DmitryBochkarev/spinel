@@ -374,10 +374,21 @@ Every path is absolute, so the caller's working directory can be anywhere:
 
 ```make
 SPINFLAGS := $(shell cd spin/backend && spin flags)
+SPINDEPS  := $(shell cd spin/backend && spin flags --deps)
 
-ruby_app.exe: ruby_app.rb $(RUBY_SRCS)
+ruby_app.exe: ruby_app.rb $(RUBY_SRCS) $(SPINDEPS)
 	spinel $(SPINFLAGS) -I . $< -o $@
 ```
+
+`spin flags --deps` prints the toolchain files rather than the flags: the
+compiler and its runtime archives. **List them as prerequisites.** A rule whose
+prerequisites are only the `.rb` sources answers "up to date" after the
+compiler or its runtime changed, and what you run next is a binary the old one
+built. That has already cost someone an A/B measurement, where both arms turned
+out to be the same compiler and the only tell was that a flag armed in the run
+produced no output (#4386). The runtime archives are in the list because a
+change under `lib/` rebuilds them and leaves the `spinel` binary untouched --
+which is exactly the shape that got missed.
 
 What it prints is what `spin build` compiles with, minus the entry file and
 `-o`; the two come from one place, so they cannot drift.

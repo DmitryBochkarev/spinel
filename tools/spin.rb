@@ -78,6 +78,9 @@ usage: spin <command> [args]
   clean                remove build/
   flags                print the compiler flags this project implies, for a
                        build driven from outside spin (Makefile, script)
+  flags --deps         print the toolchain files that build, to list as
+                       prerequisites: without them a rule is "up to date"
+                       after the compiler or its runtime changed
   ext new <name>       scaffold a CRuby extension gem (Ruby kernel -> .so)
   ext build            emit the kernel C + shim into ext/ and vendor the runtime
   ext test             differential: each case through the pure AND compiled path
@@ -2116,9 +2119,28 @@ when "flags"
   # then hands the compiler flags to whoever is driving the build. An
   # application whose repository spin does not own -- Ruby and C side by side
   # under one Makefile -- keeps its layout and still consumes packages (#4105).
+  #
+  # `--deps` prints the toolchain files that build instead of the flags, for a
+  # Makefile to list as prerequisites. Without them a rule whose prerequisites
+  # are the .rb sources answers "up to date" after the compiler or its runtime
+  # changed, and the next thing you run is a binary built by the old one -- an
+  # A/B measurement compared two builds of the same compiler that way, and the
+  # only tell was that a flag it had armed produced no output (#4386). The
+  # runtime archives are listed as well as the compiler: a change under lib/
+  # rebuilds them and leaves bin/spinel untouched.
   root = find_root(Dir.pwd)
   spin_die("no spin.toml found") if root == ""
-  puts spin_flags(Project.new(root))
+  if rest.include?("--deps")
+    out = spinel_bin
+    dir = File.expand_path("..", File.expand_path("..", spinel_bin))
+    ["lib/libspinel_rt.a", "lib/libspinel_rt_mt.a"].each do |rel|
+      p2 = File.join(dir, rel)
+      out += " " + p2 if File.exist?(p2)
+    end
+    puts out
+  else
+    puts spin_flags(Project.new(root))
+  end
 when "search"
   cmd_search(rest.empty? ? "" : rest[0])
 when "install"

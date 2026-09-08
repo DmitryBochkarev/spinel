@@ -611,6 +611,26 @@ SPINEL_BIN=$(dirname "$SPIN")/spinel
 expect "spin flags: hand-driven build matches spin build" \
   "$("$SPIN" run 2>&1 | tail -1)" "$("$WORK/handoff" 2>&1 | tail -1)"
 
+# `--deps` names the toolchain files a Makefile must list as prerequisites, or
+# its rule answers "up to date" after the compiler changed and the next thing
+# run is a binary the old one built (#4386). The runtime archives are in the
+# list because a change under lib/ rebuilds them and leaves the compiler
+# binary's timestamp alone -- the shape that actually got missed.
+DEPS=$("$SPIN" flags --deps 2>&1) || fail "spin flags --deps: exited non-zero"
+[ -n "$DEPS" ] || fail "spin flags --deps: printed nothing"
+for d in $DEPS; do
+  [ -f "$d" ] || fail "spin flags --deps: not a file: $d"
+  case "$d" in /*) ;; *) fail "spin flags --deps: relative path: $d" ;; esac
+done
+case "$DEPS" in
+  *spinel*) ;;
+  *) fail "spin flags --deps: does not name the compiler [$DEPS]" ;;
+esac
+case "$DEPS" in
+  *libspinel_rt*) ;;
+  *) fail "spin flags --deps: does not name a runtime archive [$DEPS]" ;;
+esac
+
 # --- carried C is declared, not discovered (#4362) -----------------------------
 # `.rb` enters by require-reachability and `.c` used to enter by presence, so an
 # application whose repository also holds a C program of its own -- or a scratch
