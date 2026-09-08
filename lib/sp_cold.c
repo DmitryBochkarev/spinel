@@ -2809,9 +2809,17 @@ const char *sp_range_str(sp_Range r) {
    sp_utf8_encode in sp_str.h, the overflow_p trio now also in sp_alloc.h).
    ---- */
 
-/* Integer#chr: a single byte; CRuby raises RangeError outside 0..255. */
+/* Integer#chr: a single byte; CRuby raises RangeError outside 0..255.
+   A byte above 7-bit is BINARY, as CRuby's is (`200.chr.encoding` is
+   ASCII-8BIT; only 0..127 come back on the text side). The tag is what makes
+   the byte comparable to other bytes: without it, a string built from `chr`
+   and one read back from a file held the same bytes and answered `==` false,
+   because equal bytes are equal strings only when the encodings are (the
+   rule sp_str_eq implements). Found round-tripping every byte value through
+   the zlib package. */
 const char*sp_int_chr(sp_int n){
   if(n<0||n>255)sp_raise_cls("RangeError",sp_sprintf("%lld out of char range",(long long)n));
+  if(n>=0x80)return sp_bin_char((unsigned char)n);
   return sp_plain_char((unsigned char)n);
 }
 /* Integer#chr(Encoding::UTF_8): encode the codepoint as UTF-8 (1-4 bytes).
