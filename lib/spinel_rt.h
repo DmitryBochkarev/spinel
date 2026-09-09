@@ -10561,13 +10561,13 @@ static sp_Enumerator *sp_Enumerator_new_from(sp_RbVal arr) {
     SP_GC_ROOT(cap);
     cap->first = r->first; cap->step = r->step ? r->step : 1;
     sp_Enumerator *e = sp_Enumerator_new_gen(sp_endless_range_gen, cap, sp_box_nil());
-    e->source = arr; e->meth = "each";
+    e->source = arr; e->meth = SPL("each");
     return e;
   }
   sp_PolyArray *items = sp_enum_items_from(arr);
   SP_GC_ROOT(items);
   sp_Enumerator *e = (sp_Enumerator *)sp_gc_alloc(sizeof(sp_Enumerator), NULL, sp_Enumerator_scan);
-  e->items = items; e->cursor = 0; e->gen = NULL; e->gen_cap = NULL; e->fib = NULL; e->peeked = FALSE; e->size = sp_box_nil(); e->feed = sp_box_nil(); e->has_feed = FALSE; e->gen_result = sp_box_nil(); e->source = arr; e->meth = "each";
+  e->items = items; e->cursor = 0; e->gen = NULL; e->gen_cap = NULL; e->fib = NULL; e->peeked = FALSE; e->size = sp_box_nil(); e->feed = sp_box_nil(); e->has_feed = FALSE; e->gen_result = sp_box_nil(); e->source = arr; e->meth = SPL("each");
   return e;
 }
 /* Stamp the iterated receiver and creating method onto a fresh Enumerator so
@@ -10616,7 +10616,7 @@ static sp_Enumerator *sp_Enumerator_new_from_rev(sp_RbVal arr) {
     }
   }
   sp_Enumerator *e = (sp_Enumerator *)sp_gc_alloc(sizeof(sp_Enumerator), NULL, sp_Enumerator_scan);
-  e->items = items; e->cursor = 0; e->gen = NULL; e->gen_cap = NULL; e->fib = NULL; e->peeked = FALSE; e->size = sp_box_nil(); e->feed = sp_box_nil(); e->has_feed = FALSE; e->gen_result = sp_box_nil(); e->source = arr; e->meth = "reverse_each";
+  e->items = items; e->cursor = 0; e->gen = NULL; e->gen_cap = NULL; e->fib = NULL; e->peeked = FALSE; e->size = sp_box_nil(); e->feed = sp_box_nil(); e->has_feed = FALSE; e->gen_result = sp_box_nil(); e->source = arr; e->meth = SPL("reverse_each");
   return e;
 }
 /* Wrap an already-built poly array as an Enumerator, taking ownership of it
@@ -10651,7 +10651,7 @@ static sp_Enumerator *sp_Enumerator_new_ewi(sp_RbVal arr, sp_int off) {
     sp_PolyArray_push(pair, sp_box_int(i + off));
     sp_PolyArray_push(pairs, sp_box_poly_array(pair));
   }
-  { sp_Enumerator *e = sp_Enumerator_new_from_items(pairs); e->source = arr; e->meth = "each_with_index"; return e; }
+  { sp_Enumerator *e = sp_Enumerator_new_from_items(pairs); e->source = arr; e->meth = SPL("each_with_index"); return e; }
 }
 /* A blockless Array#each_index enumerator: the indices 0..len-1. */
 static sp_Enumerator *sp_Enumerator_new_indices(sp_RbVal arr) {
@@ -10662,7 +10662,7 @@ static sp_Enumerator *sp_Enumerator_new_indices(sp_RbVal arr) {
   SP_GC_ROOT(idx);
   sp_int n = items ? items->len : 0;
   for (sp_int i = 0; i < n; i++) sp_PolyArray_push(idx, sp_box_int(i));
-  { sp_Enumerator *e = sp_Enumerator_new_from_items(idx); e->source = arr; e->meth = "each_index"; return e; }
+  { sp_Enumerator *e = sp_Enumerator_new_from_items(idx); e->source = arr; e->meth = SPL("each_index"); return e; }
 }
 /* Array#each_slice(n) with no block: a materialized Enumerator whose items are
    the consecutive non-overlapping slices of length n (the last may be short).
@@ -10758,7 +10758,7 @@ static sp_Enumerator *sp_Enumerator_new_slices(sp_RbVal arr, sp_int n) {
     if (len - i <= n) break;
     i += n;
   }
-  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); e->source = arr; e->meth = sp_sprintf("each_slice(%lld)", (long long)n); return e; }
+  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); sp_gc_wb((void*)e); e->source = arr; e->meth = sp_sprintf("each_slice(%lld)", (long long)n); return e; }
 }
 /* Array#each_cons(n) with no block: a materialized Enumerator whose items are
    the sliding windows of length n (none when len < n). */
@@ -10777,7 +10777,7 @@ static sp_Enumerator *sp_Enumerator_new_cons(sp_RbVal arr, sp_int n) {
       sp_PolyArray_push(out, sp_box_poly_array(win));
     }
   }
-  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); e->source = arr; e->meth = sp_sprintf("each_cons(%lld)", (long long)n); return e; }
+  { sp_Enumerator *e = sp_Enumerator_new_from_items(out); sp_gc_wb((void*)e); e->source = arr; e->meth = sp_sprintf("each_cons(%lld)", (long long)n); return e; }
 }
 /* Blockless <enum>.with_index(off): a materialized Enumerator whose items are
    the [element, off + i] pairs of the source enumerator's items. The source is

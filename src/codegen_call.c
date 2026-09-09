@@ -13054,7 +13054,7 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
       int te = ++g_tmp;
       buf_printf(b, "({ sp_Enumerator *_t%d = sp_Enumerator_new_from(", te);
       emit_boxed(c, recv, b);
-      buf_printf(b, "); _t%d->meth = \"%s\"; _t%d; })", te,
+      buf_printf(b, "); _t%d->meth = SPL(\"%s\"); _t%d; })", te,
                  sp_streq(name, "collect") ? "map" :
                  sp_streq(name, "find_all") ? "select" : name, te);
       return 1;
@@ -13107,12 +13107,12 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
     if (sp_streq(name, "each_byte") || sp_streq(name, "each_codepoint")) {
       const char *fn = sp_streq(name, "each_byte") ? "sp_str_bytes" : "sp_str_codepoints";
       buf_printf(b, "sp_enum_with_src(sp_Enumerator_new_from(sp_box_int_array(%s(_t%d))), "
-                    "sp_box_str(_t%d), \"%s\"); })", fn, tsrc, tsrc, name);
+                    "sp_box_str(_t%d), SPL(\"%s\")); })", fn, tsrc, tsrc, name);
       return 1;
     }
     const char *itemfn = sp_streq(name, "each_char") ? "sp_str_chars_poly" : "sp_str_lines_poly";
     buf_printf(b, "sp_enum_with_src(sp_Enumerator_new_from_items(%s(_t%d)), "
-                  "sp_box_str(_t%d), \"%s\"); })", itemfn, tsrc, tsrc, name);
+                  "sp_box_str(_t%d), SPL(\"%s\")); })", itemfn, tsrc, tsrc, name);
     return 1;
   }
   /* str.each_line(sep) with no block -> an Enumerator over the sep-kept
@@ -13127,7 +13127,7 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
                   "sp_enum_with_src(sp_Enumerator_new_from(sp_box_str_array(sp_str_lines_sep(_t%d, ",
                tsrc3, tsrc3);
     emit_expr(c, argv[0], b);
-    buf_printf(b, "))), sp_box_str(_t%d), \"each_line\"); })", tsrc3);
+    buf_printf(b, "))), sp_box_str(_t%d), SPL(\"each_line\")); })", tsrc3);
     return 1;
   }
   /* str.each_line(chomp: ...) with no block -> an Enumerator over the
@@ -13144,7 +13144,7 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
     if (is_chomp < 0) emit_cond(c, chomp_v, b);
     else buf_printf(b, "%d", is_chomp);
     buf_printf(b, "; sp_enum_with_src(sp_Enumerator_new_from(sp_box_str_array(_t%d ? sp_str_lines_chomp(_t%d) : sp_str_lines(_t%d))), "
-                  "sp_box_str(_t%d), _t%d ? \"each_line(chomp: true)\" : \"each_line(chomp: false)\"); })",
+                  "sp_box_str(_t%d), _t%d ? SPL(\"each_line(chomp: true)\") : SPL(\"each_line(chomp: false)\")); })",
                tch, tsrc2, tsrc2, tsrc2, tch);
     return 1;
   }
@@ -13170,7 +13170,7 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
     int tcy = ++g_tmp;
     buf_printf(b, "({ sp_Enumerator *_t%d = sp_Enumerator_new_cycle(", tcy);
     emit_boxed(c, recv, b);
-    buf_printf(b, ", 1); _t%d->meth = \"cycle\"; _t%d; })", tcy, tcy);
+    buf_printf(b, ", 1); _t%d->meth = SPL(\"cycle\"); _t%d; })", tcy, tcy);
     return 1;
   }
   /* arr.cycle(n) with no block -> a materialized Enumerator of the elements
@@ -22188,7 +22188,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
     if (blk < 0 && nt_ref(nt, id, "arguments") < 0) {
       buf_puts(b, "sp_enum_of_one(");
       emit_boxed(c, recv, b);
-      buf_printf(b, ", \"%s\")", name);
+      buf_printf(b, ", SPL(\"%s\"))", name);
       return;
     }
     if (blk >= 0) {
@@ -25385,7 +25385,7 @@ else {
     emit_expr(c, recv, b);
     buf_printf(b, "; SP_GC_ROOT(_t%d); "
                   "sp_enum_with_src(sp_Enumerator_new_from(sp_box_str_array(sp_re_scan(sp_re_pat_%d, _t%d))), "
-                  "sp_box_str(_t%d), \"gsub\"); })", tsg, gre, tsg, tsg);
+                  "sp_box_str(_t%d), SPL(\"gsub\")); })", tsg, gre, tsg, tsg);
     return;
   }
   /* Object receivers (incl. native-bound classes like StringScanner) dispatch
