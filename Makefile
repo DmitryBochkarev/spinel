@@ -866,7 +866,8 @@ gc-threshold-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-threshold-test: pass"; else exit 1; fi
 
-# SPINEL_GC_OBJ_BUDGET=walk prices the object budget off objects PLUS strings.
+# The object budget is priced off objects PLUS strings by default;
+# SPINEL_GC_OBJ_BUDGET=obj restores pricing it off the object heap alone.
 # The assertion is a WITHIN-RUN invariant -- the trigger against the live set
 # that same line reports -- not a comparison of one run's number with another's.
 # Both triggers retune continuously, so two runs' last lines are two different
@@ -875,21 +876,21 @@ gc-obj-budget-test: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcobj.XXXXXX); ok=1; \
 	$(SPINEL) test/gc_obj_budget_walk.rb -o "$$tmp/w" >/dev/null 2>&1 || \
 	  { echo "gc-obj-budget-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
-	SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/w" > "$$tmp/d.out" 2> "$$tmp/d.err"; \
-	SPINEL_GC_OBJ_BUDGET=walk SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/w" > "$$tmp/w.out" 2> "$$tmp/w.err"; \
+	SPINEL_GC_OBJ_BUDGET=obj SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/w" > "$$tmp/d.out" 2> "$$tmp/d.err"; \
+	SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/w" > "$$tmp/w.out" 2> "$$tmp/w.err"; \
 	cmp -s "$$tmp/d.out" test/gc_obj_budget_walk.rb.expected || \
-	  { echo "gc-obj-budget-test: FAIL (default output)"; ok=0; }; \
+	  { echo "gc-obj-budget-test: FAIL (OBJ_BUDGET=obj output)"; ok=0; }; \
 	cmp -s "$$tmp/w.out" test/gc_obj_budget_walk.rb.expected || \
-	  { echo "gc-obj-budget-test: FAIL (walk changed the answer)"; ok=0; }; \
+	  { echo "gc-obj-budget-test: FAIL (the default changed the answer)"; ok=0; }; \
 	str_of() { sed -n 's/.*+ \([0-9.]*\) MB str; trigger.*/\1/p' "$$1" | tail -1; }; \
 	trg_of() { sed -n 's/.*trigger \([0-9.]*\) MB obj.*/\1/p' "$$1" | tail -1; }; \
 	ds=$$(str_of "$$tmp/d.err"); dt=$$(trg_of "$$tmp/d.err"); \
 	ws=$$(str_of "$$tmp/w.err"); wt=$$(trg_of "$$tmp/w.err"); \
 	[ -n "$$ds" ] && [ -n "$$wt" ] || { echo "gc-obj-budget-test: FAIL (no trigger line)"; ok=0; }; \
 	awk -v t="$$dt" -v s="$$ds" 'BEGIN{exit !(t < s)}' || \
-	  { echo "gc-obj-budget-test: FAIL (the default budget already saw the strings: trigger $$dt vs live str $$ds)"; ok=0; }; \
+	  { echo "gc-obj-budget-test: FAIL (OBJ_BUDGET=obj still saw the strings: trigger $$dt vs live str $$ds)"; ok=0; }; \
 	awk -v t="$$wt" -v s="$$ws" 'BEGIN{exit !(t > s)}' || \
-	  { echo "gc-obj-budget-test: FAIL (walk did not price in the strings: trigger $$wt vs live str $$ws)"; ok=0; }; \
+	  { echo "gc-obj-budget-test: FAIL (the default did not price in the strings: trigger $$wt vs live str $$ws)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-obj-budget-test: pass"; else exit 1; fi
 

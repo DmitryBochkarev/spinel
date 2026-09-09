@@ -125,7 +125,7 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_THRESHOLD_KB` | per-worker collection budget; raise it to trade memory for fewer stop-the-world pauses (default 256) |
 | `SPINEL_GC_THRESHOLD_OBJ_KB` | the same budget for the OBJECT heap alone, overriding the pair above |
 | `SPINEL_GC_THRESHOLD_STR_KB` | the same for the STRING heap alone |
-| `SPINEL_GC_OBJ_BUDGET` | `walk` prices the object budget off objects PLUS strings -- everything a mark walks -- instead of the object heap alone (default: the object heap alone) |
+| `SPINEL_GC_OBJ_BUDGET` | `obj` prices the object budget off the object heap alone, as spinel did before 2026-09-09. The default prices it off everything a mark walks, objects plus strings |
 
 The two per-heap variables exist to answer a question the pair cannot. The
 mark walks both live sets, and only one heap's trigger decides when it runs.
@@ -141,21 +141,26 @@ The object figure is the pool-wide budget (the base times the worker count,
 for the reason in the note below); the string figure is per worker, which is
 why the string one is not multiplied.
 
-`SPINEL_GC_OBJ_BUDGET=walk` is the third lever and the one to reach for last.
-The budget is what may be allocated before the next collection, and what pays
-for it is what that collection costs -- and a collection marks BOTH heaps. So
-an object budget taken from the object live set alone is priced off the wrong
-quantity: a program can grow its string set without the collection rate
-noticing, and the mark per unit of work climbs. `walk` prices it off both.
+The object budget is what may be allocated before the next collection, and
+what pays for it is what that collection costs -- and a collection marks BOTH
+heaps. Pricing the budget off the object live set alone therefore prices it
+off the wrong quantity: a program can grow its string set without the
+collection rate noticing, and the mark per unit of work climbs. Since
+2026-09-09 the budget is priced off both, and `SPINEL_GC_OBJ_BUDGET=obj`
+restores the old behaviour.
 
-It is off by default because the argument is better than the evidence. The
-measurement it comes from (#4384) raised the object FLOOR to a fixed 16 MB per
-worker and gained 47% on a threaded server; a floor stops the budget getting
-small, which is not the same policy as making it proportional to a live set
-that can be enormous. On two shapes reproducible in this tree -- one
-single-threaded, one across eight workers, both holding a string set twenty
-times the object set -- `walk` bought no time at all and doubled RSS. Measure
-it on your own workload before you keep it.
+Measured on a threaded web application at two concurrencies: 26-44% more
+requests per second, at within 5-10% of the memory a fixed
+`SPINEL_GC_THRESHOLD_OBJ_KB` floor costs for the same work. The reason to
+prefer it over that floor is that it tracks: it settles around 70-78 MB where
+the floor would pin 128, and around 227-253 MB where the floor would be too
+small. Any fixed number is wrong at one end of a concurrency range.
+
+What it does not do is ask whether the mark is what you are paying for. It
+widens the budget by the mark set either way, so a program that holds a large
+live string set while collecting cheaply pays memory and gets nothing back.
+`obj` is the answer for that shape until the budget learns to read the mark's
+actual cost.
 
 ### A note on allocation-heavy threads
 

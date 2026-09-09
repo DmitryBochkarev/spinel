@@ -191,7 +191,7 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
   /* Read here rather than in sp_alloc_worker_tune, which a single-threaded
      program never calls: the budget policy is not a threads-only question. */
   { const char *ob = getenv("SPINEL_GC_OBJ_BUDGET");
-    sp_gc_obj_budget_walk = (ob && strcmp(ob, "walk") == 0) ? 1 : 0; }
+    sp_gc_obj_budget_walk = (ob && strcmp(ob, "obj") == 0) ? 0 : 1; }
   if (sp_gc_verify) { signal(SIGSEGV, sp_gc_fault_report); signal(SIGBUS, sp_gc_fault_report); }
 }
 

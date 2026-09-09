@@ -48,7 +48,7 @@ size_t sp_str_old_bytes = 0;
 /* SPINEL_GC_OBJ_BUDGET=walk: size the object collection budget from the whole
    set a mark walks (objects + strings) rather than the object heap alone.
    Read once, beside the other boot-time GC modes. */
-int sp_gc_obj_budget_walk = 0;
+int sp_gc_obj_budget_walk = 1;
 size_t sp_str_old_threshold = 1024 * 1024;
 size_t sp_str_old_threshold_init = 1024 * 1024;
 
@@ -285,17 +285,25 @@ void sp_gc_retune_object(size_t before) {
      the wrong quantity: rubys measured a ladder where the string live set
      grows 26x while the object set grows 4.9x, the collection rate falls with
      the object set, and the mark per request rises 2.5x (#4384).
-     SPINEL_GC_OBJ_BUDGET=walk prices it off both.
+     This is the default. SPINEL_GC_OBJ_BUDGET=obj restores pricing it off
+     the object heap alone.
 
-     It is OPT-IN, and the reason is that the argument for it is sound and the
-     evidence for it is not. What rubys measured at +47% was a fixed 16 MB
-     FLOOR, which is a different policy: a floor stops the budget getting
-     small, this makes it proportional to a set that can be enormous. On the
-     two shapes reproducible here -- one single-threaded, one across eight
-     workers, both with a string set 20x the object set -- proportional bought
-     no time at all and doubled RSS (53 MB -> 116 MB threaded). Whether it
-     wins on the workload it was reasoned from is a measurement only that
-     workload can make. */
+     It shipped opt-in first, because the argument was sound and the evidence
+     was not: what had been measured at +47% was a fixed 16 MB FLOOR, which is
+     a different policy -- a floor stops the budget getting small, this makes
+     it proportional. rubys then ran both, on two emits at two concurrencies,
+     twice each. Pricing it off the walk reproduces the floor's throughput
+     (+26% to +44%) at within 5-10% of the floor's memory, and the reason to
+     prefer it is neither of those: it settles at 70-78 MB where the floor
+     pins 128, and at 227-253 MB where the floor is too small, so it is right
+     at both ends of a 3.3x concurrency swing. A fixed number cannot be.
+     Our own 61 benchmarks and optcarrot are neutral on it: same wall, RSS
+     within 0.5%, fps inside its spread.
+     Known cost, and the next thing to fix: it widens the budget by the mark
+     set whether or not the mark is what the program is paying for. Two
+     synthetics here that hold a large live string set while collecting
+     cheaply pay memory for nothing. Gating the widening on a measured mark
+     cost is the better policy and does not exist yet. */
   size_t walk = live;
   if (sp_gc_obj_budget_walk) walk += sp_str_live_total();
   /* saturating: the live counter is a heuristic and is allowed to lag, so it
