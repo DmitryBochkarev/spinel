@@ -23300,7 +23300,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
        emit a sp_poly_hash_get_pair_val call, resolve the value to a
        primitive (Integer fd, true, Integer, String), and push it into
        a flat PolyArray. The runtime (sp_process_spawn) takes the
-       7-element flat array positionally -- this keeps the runtime
+       8-element flat array positionally -- this keeps the runtime
        TU out of spinel_rt.h's static-inline family entirely. The
        [:child, :out|:err|Integer] redirect is recognized inline. */
     if (tcn && sp_streq(tcn, "Process") && sp_streq(name, "spawn") && argc >= 1) {
@@ -23333,11 +23333,13 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         emit_boxed(c, argv[k], b);
         buf_puts(b, ");");
       }
-      /* opts: build a 7-element flat PolyArray
-         [in_fd, out_fd, err_fd, pgroup, rlimit_cpu, rlimit_as, chdir].
+      /* opts: build an 8-element flat PolyArray
+         [in_fd, out_fd, err_fd, pgroup, rlimit_cpu, rlimit_as, chdir, owned].
          If last_is_opts, each entry is a hash lookup result resolved
          to a primitive. If not, all entries are nil/0. */
       buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", topts, topts);
+      int town = ++g_tmp;
+      buf_printf(b, " int _t%d[3] = { -1, -1, -1 };", town);
       if (last_is_opts) {
         int tth = ++g_tmp;
         int tkv = ++g_tmp;
@@ -23349,7 +23351,11 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
            resolve it. The C block is emitted three times with the
            key name changed -- a top-level static helper would be
            cleaner but cannot be declared inside a statement
-           expression. */
+           expression. A filename is opened by the runtime, read-only
+           for :in and write-truncate for :out and :err, and the fds
+           it opened are recorded in _town so the runtime can close
+           the parent's copies once the child has its own; a caller's
+           IO is never closed. */
         const char *fd_keys[] = { "in", "out", "err" };
         for (int i = 0; i < 3; i++) {
           buf_printf(b,
@@ -23367,9 +23373,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             "  } else if (_v.tag == SP_TAG_OBJ && _v.cls_id == SP_BUILTIN_IO && _v.v.p) { "
             "    sp_PolyArray_push(_t%d, sp_box_int(sp_File_fileno((sp_File*)_v.v.p))); "
             "  } else if (_v.tag == SP_TAG_STR) { "
-            "    int _fd = open(_v.v.s, O_WRONLY|O_CREAT|O_TRUNC, 0644); "
-            "    if (_fd < 0) sp_raise_cls(\"Errno::ENOENT\", _v.v.s); "
-            "    sp_PolyArray_push(_t%d, sp_box_int(_fd)); "
+            "    sp_PolyArray_push(_t%d, sp_box_int(sp_process_open_redirect(_v.v.s, %d, _t%d))); "
             "  } else if (_v.tag == SP_TAG_OBJ && _v.cls_id == SP_BUILTIN_POLY_ARRAY) { "
             "    sp_PolyArray *_a = (sp_PolyArray*)_v.v.p; "
             "    if (_a->len >= 2 && _a->data[0].tag == SP_TAG_SYM "
@@ -23381,18 +23385,18 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             "        } else if (_fdv.v.i == sp_sym_intern(\"err\")) { "
             "          sp_PolyArray_push(_t%d, sp_box_int(2)); "
             "        } else { "
-            "          sp_raise_cls(\"ArgumentError\", \"bad redirect value\"); "
+            "          sp_process_spawn_fail(_t%d, \"ArgumentError\", \"bad redirect value\"); "
             "        } "
             "      } else if (_fdv.tag == SP_TAG_INT) { "
             "        sp_PolyArray_push(_t%d, sp_box_int((int)_fdv.v.i)); "
             "      } else { "
-            "        sp_raise_cls(\"ArgumentError\", \"bad redirect value\"); "
+            "        sp_process_spawn_fail(_t%d, \"ArgumentError\", \"bad redirect value\"); "
             "      } "
             "    } else { "
-            "      sp_raise_cls(\"ArgumentError\", \"bad child-array shape\"); "
+            "      sp_process_spawn_fail(_t%d, \"ArgumentError\", \"bad child-array shape\"); "
             "    } "
             "  } else { "
-            "    sp_raise_cls(\"ArgumentError\", \"bad redirect type\"); "
+            "    sp_process_spawn_fail(_t%d, \"ArgumentError\", \"bad redirect type\"); "
             "  } "
             "} else { sp_PolyArray_push(_t%d, sp_box_int(-1)); } }",
             tkv, tfd, tkv, tth, fd_keys[i], tfd,
@@ -23401,10 +23405,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
             topts,
             topts,
             topts,
+            topts, i, town,
             topts,
             topts,
+            town,
             topts,
-            topts,
+            town,
+            town,
+            town,
             topts);
         }
         /* pgroup: look up, accept true / 0 / Integer, or 0. */
@@ -23455,13 +23463,17 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_nil());", topts);
         buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_nil());", topts);
       }
+      /* Slot 7: which of in/out/err the runtime opened itself, a bit per
+         slot, so it closes the parent's copies and never a caller's IO. */
+      buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int((_t%d[0] >= 0) | ((_t%d[1] >= 0) << 1) | ((_t%d[2] >= 0) << 2)));",
+                 topts, town, town, town);
       /* If cmd is an Array, fold its elements into args (prefix). */
       buf_printf(b, " sp_PolyArray *_t%d = _t%d;", tmerged, targs);
       buf_printf(b, " if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_POLY_ARRAY) {", tcmd, tcmd);
       buf_printf(b, "   sp_PolyArray *_cmd = (sp_PolyArray *)_t%d.v.p;", tcmd);
       buf_printf(b, "   _t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tmerged, tmerged);
       buf_printf(b, "   for (sp_int _i = 0; _i < _cmd->len - 1; _i++) {");
-      buf_printf(b, "     if (_cmd->data[_i].tag != SP_TAG_STR) sp_raise_cls(\"ArgumentError\", \"command array element must be a String\");");
+      buf_printf(b, "     if (_cmd->data[_i].tag != SP_TAG_STR) sp_process_spawn_fail(_t%d, \"ArgumentError\", \"command array element must be a String\");", town);
       buf_printf(b, "     sp_PolyArray_push(_t%d, _cmd->data[_i]);", tmerged);
       buf_printf(b, "   }");
       buf_printf(b, "   for (sp_int _i = 0; _i < _t%d->len; _i++) sp_PolyArray_push(_t%d, _t%d->data[_i]);", targs, tmerged, targs);

@@ -2,8 +2,8 @@
  *
  * Lives in its own TU because the codegen calls sp_process_spawn
  * with pre-resolved positional args (in_fd, out_fd, err_fd, pgroup,
- * rlimit_cpu, rlimit_as, chdir). All opts-hash unpacking happens at
- * compile time in the codegen; the runtime just needs primitive int
+ * rlimit_cpu, rlimit_as, chdir, owned). All opts-hash unpacking happens
+ * at compile time in the codegen; the runtime just needs primitive int
  * / int-fd / int-pgroup / int-rlimit values. The cmd is either a
  * String or an Array (boxed as a PolyArray). args is a PolyArray of
  * extra String args appended after cmd.
@@ -18,21 +18,29 @@
  * Process.spawn(cmd, *args, opts) -> child pid
  * Process.waitpid2(pid) -> [pid, raw_status]
  *
- * opts is a PolyArray of 7 elements in this order:
- *   [0] in_fd        - Integer fd (>= 0), -1 for false/nil, IO was
- *                      resolved to its fd by the codegen, String path
- *                      was opened by the codegen
+ * opts is a PolyArray of 8 elements in this order:
+ *   [0] in_fd        - Integer fd (>= 0), -1 for false/nil/absent. An IO
+ *                      was resolved to its fd by the codegen; a String
+ *                      path was opened here, by sp_process_open_redirect,
+ *                      which the generated program calls before this
  *   [1] out_fd       - same conventions
  *   [2] err_fd       - same conventions
  *   [3] pgroup       - Integer (0=inherit, 1=new, >1=specific pgid)
  *   [4] rlimit_cpu   - Integer (seconds), nil = no limit
  *   [5] rlimit_as    - Integer (bytes), nil = no limit
  *   [6] chdir        - String path or nil
+ *   [7] owned        - Integer bit mask, bit 0/1/2 set when [0]/[1]/[2]
+ *                      is an fd sp_process_open_redirect opened for this
+ *                      spawn; those are closed here once the child has
+ *                      its copies, and on every raise this file makes
+ *                      before the fork.
+ *                      A caller's IO or Integer fd is never in the mask.
  *
- * IO and String values in opts[0..2] are resolved to fds by the
- * codegen (which has access to sp_File_fileno and open(2)). The
- * [:child, :out|:err|Integer] form is also resolved by the codegen
- * (it sees the literal array at parse time).
+ * An IO value in opts[0..2] is resolved to its fd by the codegen (which
+ * has access to sp_File_fileno); a String value reaches the runtime
+ * through sp_process_open_redirect. The [:child, :out|:err|Integer]
+ * form is resolved by the codegen (it sees the literal array at parse
+ * time).
  */
 
 #include <fcntl.h>
@@ -47,6 +55,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
 
 #include "sp_alloc.h"   /* sp_PolyArray, sp_RbVal, sp_box_*, sp_raise_cls */
 #include "sp_process_status.h"   /* sp_ProcessStatus, sp_box_process_status */
@@ -89,9 +98,64 @@ static void close_redirect_srcs(int in_fd, int out_fd, int err_fd) {
   }
 }
 
+/* The fds this spawn opened itself, one slot each for in/out/err and -1
+   where the slot came from the caller (an IO, an Integer, nothing). Only
+   these are the spawn's to close: the child closes its copies after the
+   dup2s above, and the parent closes its own once the child has them. */
+static void close_owned(const int *owned) {
+  for (int i = 0; i < 3; i++) if (owned[i] >= 0) close(owned[i]);
+}
+
+/* Raise on the spawn's behalf: the fds it opened are released first, so a
+   spawn that never forks does not leave them behind. errno survives the
+   closes for the Errno class the raise builds. */
+SP_NORETURN void sp_process_spawn_fail(int *owned, const char *cls, const char *msg) {
+  int e = errno;
+  close_owned(owned);
+  errno = e;
+  sp_raise_cls(cls, msg);
+}
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+/* A filename redirection, opened here rather than by the generated program:
+   read-only for slot 0 (:in), created and truncated for :out and :err. The
+   fd is recorded in owned[slot]. A failed open raises the Errno class CRuby
+   raises, with CRuby's message, after releasing the fds already opened for
+   this spawn. The ladder is sp_file_open_raise's four (sp_cold.c) plus the
+   six more errnos open(2) answers for a path; anything else is a bare
+   SystemCallError. The message is built in a buffer sized for a path, and
+   sp_raise_cls copies it before it can allocate, so a local is enough. */
+int sp_process_open_redirect(const char *path, int slot, int *owned) {
+  int flags = slot == 0 ? O_RDONLY : O_WRONLY | O_CREAT | O_TRUNC;
+  int fd = open(path, flags, 0644);
+  if (fd < 0) {
+    int e = errno;
+    const char *cls = e == ENOENT ? "Errno::ENOENT" :
+                      e == EACCES ? "Errno::EACCES" :
+                      e == EEXIST ? "Errno::EEXIST" :
+                      e == EISDIR ? "Errno::EISDIR" :
+                      e == ENOTDIR ? "Errno::ENOTDIR" :
+                      e == ENAMETOOLONG ? "Errno::ENAMETOOLONG" :
+                      e == ELOOP ? "Errno::ELOOP" :
+                      e == EROFS ? "Errno::EROFS" :
+                      e == EMFILE ? "Errno::EMFILE" :
+                      e == ENFILE ? "Errno::ENFILE" : "SystemCallError";
+    char msg[PATH_MAX + 64];
+    snprintf(msg, sizeof msg, "%s - %s", strerror(e), path);
+    errno = e;
+    sp_process_spawn_fail(owned, cls, msg);
+  }
+  owned[slot] = fd;
+  return fd;
+}
+
 /* Extract a resolved Integer fd from a pre-resolved opts slot. The
-   codegen turns IO/String/false into Integer before passing; we
-   just unbox. -1 means "not set" (/dev/null). */
+   codegen turns IO/false into Integer before passing, and a String
+   path arrives as the fd sp_process_open_redirect returned; we just
+   unbox. -1 means "not set": inherit the parent's, per apply_redirect. */
 static int slot_to_fd(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL) return -1;
   if (v.tag == SP_TAG_BOOL && v.v.i == 0) return -1;
@@ -106,41 +170,47 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
   SP_GC_ROOT_RBVAL(args_box);
   SP_GC_ROOT_RBVAL(opts_box);
 
-  /* opts_box must be a PolyArray of 7 elements. */
+  /* opts_box must be a PolyArray of 8 elements. */
   if (opts_box.tag != SP_TAG_OBJ ||
       opts_box.cls_id != SP_BUILTIN_POLY_ARRAY) {
     sp_raise_cls("TypeError", "opts must be a PolyArray (codegen bug)");
   }
   sp_PolyArray *opts = (sp_PolyArray *)opts_box.v.p;
-  if (opts->len < 7) {
+  if (opts->len < 8) {
     sp_raise_cls("ArgumentError", "opts array too short (codegen bug)");
   }
   int in_fd  = slot_to_fd(opts->data[0]);
   int out_fd = slot_to_fd(opts->data[1]);
   int err_fd = slot_to_fd(opts->data[2]);
+  /* Slot 7: a bit per slot the generated program had this file open for
+     it, so those fds are the spawn's to close; a caller's IO stays open. */
+  int owned_mask = opts->data[7].tag == SP_TAG_INT ? (int)opts->data[7].v.i : 0;
+  int owned[3] = { owned_mask & 1 ? in_fd : -1,
+                   owned_mask & 2 ? out_fd : -1,
+                   owned_mask & 4 ? err_fd : -1 };
 
   int pgroup = 0;
   if (opts->data[3].tag == SP_TAG_NIL) pgroup = 0;
   else if (opts->data[3].tag == SP_TAG_BOOL && opts->data[3].v.i == 1) pgroup = 1;
   else if (opts->data[3].tag == SP_TAG_INT) pgroup = (int)opts->data[3].v.i;
-  else sp_raise_cls("TypeError", "pgroup must be true, 0, or Integer");
+  else sp_process_spawn_fail(owned, "TypeError", "pgroup must be true, 0, or Integer");
 
   int rlimit_cpu_set = 0;
   rlim_t rlimit_cpu_val = 0;
   if (opts->data[4].tag == SP_TAG_INT) { rlimit_cpu_set = 1; rlimit_cpu_val = (rlim_t)opts->data[4].v.i; }
   else if (opts->data[4].tag != SP_TAG_NIL)
-    sp_raise_cls("TypeError", "rlimit_cpu must be Integer");
+    sp_process_spawn_fail(owned, "TypeError", "rlimit_cpu must be Integer");
 
   int rlimit_as_set = 0;
   rlim_t rlimit_as_val = 0;
   if (opts->data[5].tag == SP_TAG_INT) { rlimit_as_set = 1; rlimit_as_val = (rlim_t)opts->data[5].v.i; }
   else if (opts->data[5].tag != SP_TAG_NIL)
-    sp_raise_cls("TypeError", "rlimit_as must be Integer");
+    sp_process_spawn_fail(owned, "TypeError", "rlimit_as must be Integer");
 
   const char *chdir_to = NULL;
   if (opts->data[6].tag == SP_TAG_STR) chdir_to = opts->data[6].v.s;
   else if (opts->data[6].tag != SP_TAG_NIL)
-    sp_raise_cls("TypeError", "chdir must be a String");
+    sp_process_spawn_fail(owned, "TypeError", "chdir must be a String");
 
   /* Resolve cmd + args into argv. */
   const char *prog = NULL;
@@ -156,14 +226,14 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
         args_box.cls_id == SP_BUILTIN_POLY_ARRAY) {
       args_arr = (sp_PolyArray *)args_box.v.p;
     } else if (args_box.tag != SP_TAG_NIL) {
-      sp_raise_cls("TypeError", "args must be a PolyArray of extra args");
+      sp_process_spawn_fail(owned, "TypeError", "args must be a PolyArray of extra args");
     }
   } else if (cmd.tag == SP_TAG_OBJ &&
              cmd.cls_id == SP_BUILTIN_POLY_ARRAY) {
     cmd_arr = (sp_PolyArray *)cmd.v.p;
-    if (cmd_arr->len < 1) sp_raise_cls("ArgumentError", "empty command array");
+    if (cmd_arr->len < 1) sp_process_spawn_fail(owned, "ArgumentError", "empty command array");
     if (cmd_arr->data[0].tag != SP_TAG_STR)
-      sp_raise_cls("ArgumentError", "command[0] must be a String");
+      sp_process_spawn_fail(owned, "ArgumentError", "command[0] must be a String");
     prog = cmd_arr->data[0].v.s;
     extra_from_cmd = cmd_arr->len - 1;
     if (args_box.tag == SP_TAG_OBJ &&
@@ -171,27 +241,27 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
       args_arr = (sp_PolyArray *)args_box.v.p;
     }
   } else {
-    sp_raise_cls("TypeError",
-                 "wrong first argument type (expected String or Array)");
+    sp_process_spawn_fail(owned, "TypeError",
+                          "wrong first argument type (expected String or Array)");
   }
   if (args_arr) extra_from_args = (int)args_arr->len;
 
   int total = 1 + extra_from_cmd + extra_from_args;
   argv = (char **)malloc(sizeof(char *) * (size_t)(total + 1));
-  if (!argv) sp_raise_cls("NoMemoryError", "out of memory");
+  if (!argv) sp_process_spawn_fail(owned, "NoMemoryError", "out of memory");
   argv[0] = (char *)prog;
   int ai = 1;
   if (cmd_arr) {
     for (int i = 1; i < cmd_arr->len; i++) {
       if (cmd_arr->data[i].tag != SP_TAG_STR)
-        sp_raise_cls("ArgumentError", "command array element must be a String");
+        sp_process_spawn_fail(owned, "ArgumentError", "command array element must be a String");
       argv[ai++] = (char *)cmd_arr->data[i].v.s;
     }
   }
   if (args_arr) {
     for (int i = 0; i < args_arr->len; i++) {
       if (args_arr->data[i].tag != SP_TAG_STR)
-        sp_raise_cls("ArgumentError", "spawn args must be Strings");
+        sp_process_spawn_fail(owned, "ArgumentError", "spawn args must be Strings");
       argv[ai++] = (char *)args_arr->data[i].v.s;
     }
   }
@@ -205,13 +275,13 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
   int err_pipe[2];
   if (pipe(err_pipe) < 0) {
     free(argv);
-    sp_raise_cls("SystemCallError", sp_errf_errno("pipe failed", errno));
+    sp_process_spawn_fail(owned, "SystemCallError", sp_errf_errno("pipe failed", errno));
   }
 
   pid_t pid = fork();
   if (pid < 0) {
     free(argv);
-    sp_raise_cls("SystemCallError", sp_errf_errno("fork failed", errno));
+    sp_process_spawn_fail(owned, "SystemCallError", sp_errf_errno("fork failed", errno));
   }
   if (pid == 0) {
     /* CHILD. If execve fails, write the errno to the parent's pipe
@@ -252,8 +322,11 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
     (void)!write(err_pipe[1], &e, sizeof e);
     _exit(127);
   }
-  /* PARENT. Close the child's write end, read the errno if any. */
+  /* PARENT. The child has its own copies of the redirections now, so the
+     ones this spawn opened are closed here, on the exec-failure path too;
+     then close the child's write end and read the errno if any. */
   close(err_pipe[1]);
+  close_owned(owned);
   int exec_errno = 0;
   ssize_t got = read(err_pipe[0], &exec_errno, sizeof exec_errno);
   close(err_pipe[0]);
