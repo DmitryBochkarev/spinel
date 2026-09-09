@@ -123,7 +123,21 @@ module Net
       @headers = {}
       @header_names = {}
       @body = ""
-      initheader.each { |k, v| self[k] = v } unless initheader.nil?
+      # CRuby's initheader half strips the value before it looks at it, and
+      # so raises NoMethodError for anything without `strip`; this package
+      # strips a String and lets the other shapes through to `#[]=`, as it
+      # already did. So a trailing newline here is whitespace, and the
+      # message names the header where `#[]=`'s does not. Both are kept, so a
+      # caller rescuing on the message sees the one CRuby raises.
+      unless initheader.nil?
+        initheader.each do |k, v|
+          v = v.strip if v.is_a?(String)
+          if v.is_a?(String) && crlf?(v)
+            raise ArgumentError, "header #{k} has field value #{v.inspect}, this cannot include CR/LF"
+          end
+          self[k] = v
+        end
+      end
     end
 
     # Header names are case-insensitive on the wire, and CRuby's
@@ -146,10 +160,15 @@ module Net
       #
       # CRuby only reaches that path through `#[]=`; its initheader half calls
       # `value.strip` per value and so raises NoMethodError for an Array. This
-      # package routes initheader through `#[]=` and therefore accepts one -- a
-      # deliberate divergence, in the permissive direction, and one rule for one
-      # value shape rather than two.
-      @headers[k] = value.is_a?(Array) ? value.map { |v| v.to_s }.join(", ") : value.to_s
+      # package routes initheader through `#[]=` and therefore accepts one whose
+      # elements are clean -- a deliberate divergence, in the permissive
+      # direction, and one rule for one value shape rather than two. An element
+      # carrying a break is refused below, like any other value.
+      text = value.is_a?(Array) ? value.map { |v| v.to_s }.join(", ") : value.to_s
+      # The joined text carries every element's bytes, so one check covers a
+      # break in any element as well as in a scalar.
+      raise ArgumentError, "header field value cannot include CR/LF" if crlf?(text)
+      @headers[k] = text
       @header_names[k] = name.to_s
       value
     end
@@ -180,6 +199,14 @@ module Net
       @body = URI.encode_www_form(hash)
       self["Content-Type"] = "application/x-www-form-urlencoded"
       @body
+    end
+
+    private
+
+    # A carriage return or a line feed in a header value would end the
+    # header on the wire and make whatever follows it a header of its own.
+    def crlf?(text)
+      text.include?("\r") || text.include?("\n")
     end
   end
 
