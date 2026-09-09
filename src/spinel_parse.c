@@ -1770,18 +1770,75 @@ static int sp_included_cap = 0;
    after doesn't extend the word -- so `Set[`, `Set.new`, `Set(` hit while
    `Settings`, `OffSet`, `Foo::Set` don't) or calls `.to_set`. Drives the
    implicit `require "set"` splice below. */
+/* The scan runs over CODE, not over the file. It was a plain strstr over the
+   whole text, so the word in a comment counted: `# Set` at the top of a
+   hello-world spliced the whole of set.rb in and took its generated C from 41
+   lines to 959 (#4411). On the reporter's program it did worse than waste --
+   a sentence in a benchmark's header comment linked Set, which changed the
+   lowering of an unrelated closure and with it the ANSWER (#4410).
+
+   Skipping is deliberately conservative, because a false negative drops a
+   `require` the program needs while a false positive only wastes: an
+   interpolation inside a double-quoted string is scanned as the code it is,
+   and every literal form not handled here -- %w, heredocs, regexps -- stays
+   code and keeps the old over-linking behaviour. */
+static int sp_set_word_at(const char *src, const char *p) {
+  char prev = p == src ? 0 : p[-1];
+  char next = p[3];
+  int prev_ok = prev == 0 ||
+                (!((prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
+                   (prev >= '0' && prev <= '9') || prev == '_' || prev == ':' || prev == '.'));
+  int next_ok = !((next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') ||
+                  (next >= '0' && next <= '9') || next == '_');
+  return prev_ok && next_ok;
+}
 static int source_references_set(const char *src) {
-  for (const char *p = strstr(src, "Set"); p; p = strstr(p + 1, "Set")) {
-    char prev = p == src ? 0 : p[-1];
-    char next = p[3];
-    int prev_ok = prev == 0 ||
-                  (!((prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') ||
-                     (prev >= '0' && prev <= '9') || prev == '_' || prev == ':' || prev == '.'));
-    int next_ok = !((next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') ||
-                    (next >= '0' && next <= '9') || next == '_');
-    if (prev_ok && next_ok) return 1;
+  const char *p = src;
+  int bol = 1;   /* at the beginning of a line, for =begin/=end */
+  while (*p) {
+    if (bol && strncmp(p, "=begin", 6) == 0) {
+      const char *e = strstr(p, "\n=end");
+      if (!e) return 0;          /* unterminated: the rest of the file is comment */
+      p = e + 5;
+      continue;
+    }
+    bol = 0;
+    if (*p == '#') {             /* comment to end of line */
+      while (*p && *p != '\n') p++;
+      continue;
+    }
+    if (*p == '\'') {            /* single quotes do not interpolate: skip whole */
+      p++;
+      while (*p && *p != '\'') { if (*p == '\\' && p[1]) p++; p++; }
+      if (*p) p++;
+      continue;
+    }
+    if (*p == '"') {             /* skip the text, but scan #{...} as code */
+      p++;
+      while (*p && *p != '"') {
+        if (*p == '\\' && p[1]) { p += 2; continue; }
+        if (p[0] == '#' && p[1] == '{') {
+          const char *q = p + 2;
+          int depth = 1;
+          while (*q && depth) { if (*q == '{') depth++; else if (*q == '}') depth--; q++; }
+          for (const char *r = p + 2; r < q; r++)
+            if (strncmp(r, "Set", 3) == 0 && sp_set_word_at(src, r)) return 1;
+          for (const char *r = p + 2; r + 7 <= q; r++)
+            if (strncmp(r, ".to_set", 7) == 0) return 1;
+          p = q;
+          continue;
+        }
+        p++;
+      }
+      if (*p) p++;
+      continue;
+    }
+    if (strncmp(p, "Set", 3) == 0 && sp_set_word_at(src, p)) return 1;
+    if (strncmp(p, ".to_set", 7) == 0) return 1;
+    if (*p == '\n') bol = 1;
+    p++;
   }
-  return strstr(src, ".to_set") != NULL;
+  return 0;
 }
 
 /* ---- require-gate: features enabled by a `require "name"` ----
