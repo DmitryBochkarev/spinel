@@ -125,7 +125,23 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_THRESHOLD_KB` | per-worker collection budget; raise it to trade memory for fewer stop-the-world pauses (default 256) |
 | `SPINEL_GC_THRESHOLD_OBJ_KB` | the same budget for the OBJECT heap alone, overriding the pair above |
 | `SPINEL_GC_THRESHOLD_STR_KB` | the same for the STRING heap alone |
-| `SPINEL_GC_OBJ_BUDGET` | `obj` prices the object budget off the object heap alone, as spinel did before 2026-09-09. The default prices it off everything a mark walks, objects plus strings |
+| `SPINEL_GC_OBJ_BUDGET` | `obj` prices the object budget off the object heap alone, as spinel did before 2026-09-09. The default prices it off everything a mark walks, objects plus strings. `fixed` stops re-aiming it after each collection and holds it at its floor |
+| `SPINEL_GC_STR_BUDGET` | `fixed` does the same for the STRING budget |
+
+The three `_KB` variables set where a budget STARTS; the collector re-aims it
+from what the collection found. That is right for running a program and wrong
+for asking what the re-aiming is responsible for, which is why `fixed` exists.
+With it, the budget is whatever the floor says and stays there, so two builds
+of one program differ by the change under test and not by two different pacing
+histories.
+
+It is a diagnostic and not a policy. Fixing the budget per worker makes the
+aggregate scale with the worker count, which is exactly what the adaptive
+budget is shaped to avoid: on a workload here the adaptive aggregate trigger
+is 224 MB at one worker and 228 MB at eight, while a budget pinned at 64 MB
+per worker is 128 MB at one and 576 MB at eight, and the resident set follows
+it from 253 MB to 1.4 GB.
+
 
 The two per-heap variables exist to answer a question the pair cannot. The
 mark walks both live sets, and only one heap's trigger decides when it runs.
