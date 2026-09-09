@@ -2310,6 +2310,7 @@ void sp_Enumerator_scan(void *p) {
   if (e->has_feed) sp_mark_rbval(e->feed);
   sp_mark_rbval(e->gen_result);
   sp_mark_rbval(e->source);
+  sp_mark_string(e->meth);
 }
 sp_Enumerator *sp_enum_with_src(sp_Enumerator *e, sp_RbVal src, const char *meth) { sp_gc_wb((void*)e);
   e->source = src;
@@ -2354,7 +2355,7 @@ sp_Enumerator *sp_enum_of_one(sp_RbVal v, const char *meth) {
 sp_Enumerator *sp_Enumerator_new_from_items(sp_PolyArray *items) {
   SP_GC_ROOT(items);
   sp_Enumerator *e = (sp_Enumerator *)sp_gc_alloc(sizeof(sp_Enumerator), NULL, sp_Enumerator_scan);
-  e->items = items; e->cursor = 0; e->gen = NULL; e->gen_cap = NULL; e->fib = NULL; e->peeked = FALSE; e->size = sp_box_nil(); e->feed = sp_box_nil(); e->has_feed = FALSE; e->gen_result = sp_box_nil(); e->source = sp_box_nil(); e->meth = "each";
+  e->items = items; e->cursor = 0; e->gen = NULL; e->gen_cap = NULL; e->fib = NULL; e->peeked = FALSE; e->size = sp_box_nil(); e->feed = sp_box_nil(); e->has_feed = FALSE; e->gen_result = sp_box_nil(); e->source = sp_box_nil(); e->meth = SPL("each");
   return e;
 }
 /* Lazy with_index over a generator-backed source (blockless Kernel#loop,
@@ -2425,7 +2426,7 @@ sp_Enumerator *sp_Enumerator_with_index(sp_Enumerator *e, sp_int off) {
 }
 sp_Enumerator *sp_Enumerator_new_gen(void (*gen)(sp_Fiber *), void *cap, sp_RbVal size) {SP_GC_ROOT_RBVAL(size);
   sp_Enumerator *e = (sp_Enumerator *)sp_gc_alloc(sizeof(sp_Enumerator), NULL, sp_Enumerator_scan);
-  e->items = NULL; e->cursor = 0; e->gen = gen; e->gen_cap = cap; e->fib = NULL; e->peeked = FALSE; e->size = size; e->feed = sp_box_nil(); e->has_feed = FALSE; e->gen_result = sp_box_nil(); e->source = sp_box_nil(); e->meth = "each";
+  e->items = NULL; e->cursor = 0; e->gen = gen; e->gen_cap = cap; e->fib = NULL; e->peeked = FALSE; e->size = size; e->feed = sp_box_nil(); e->has_feed = FALSE; e->gen_result = sp_box_nil(); e->source = sp_box_nil(); e->meth = SPL("each");
   return e;
 }
 /* Blockless Kernel#loop: an infinite Enumerator that yields nil forever (#3236).
@@ -2436,7 +2437,7 @@ static void sp_loop_gen(sp_Fiber *f) {
 }
 sp_Enumerator *sp_loop_enum(void) {
   sp_Enumerator *e = sp_Enumerator_new_gen(sp_loop_gen, NULL, sp_box_nil());
-  e->meth = "loop";
+  e->meth = SPL("loop");
   return e;
 }
 
