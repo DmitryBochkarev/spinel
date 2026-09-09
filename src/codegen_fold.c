@@ -3234,6 +3234,15 @@ int emit_inject_expr(Compiler *c, int id, Buf *b) {
 
   int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp, tn = ++g_tmp;
   buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
+  /* The String arm is the one of the three that allocates between turns:
+     every sp_str_concat below builds a fresh String, and the loop takes the
+     next element out of this temp after it. An array a method call returned
+     has no other holder, so a collection landing in the concat freed it
+     mid-walk. Nothing the Integer and Float arms' walk continues past
+     allocates, so they keep the bare hoist. The accumulator needs no root of
+     its own: sp_str_concat roots its arguments on entry, and nothing runs
+     between one turn's answer and the next turn's call. */
+  if (str_op) buf_printf(b, "; SP_GC_ROOT(_t%d)", ta);
   buf_printf(b, "; sp_int _t%d = sp_%sArray_length(_t%d); ", tn, k, ta);
   emit_ctype(c, et, b); buf_printf(b, " _t%d = ", tacc);
   int start;
