@@ -191,7 +191,20 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
   /* Read here rather than in sp_alloc_worker_tune, which a single-threaded
      program never calls: the budget policy is not a threads-only question. */
   { const char *ob = getenv("SPINEL_GC_OBJ_BUDGET");
-    sp_gc_obj_budget_walk = (ob && strcmp(ob, "obj") == 0) ? 0 : 1; }
+    sp_gc_obj_budget_walk = (ob && strcmp(ob, "obj") == 0) ? 0 : 1;
+    /* PINNED, not floored. SPINEL_GC_THRESHOLD_*_KB sets where the budget
+       STARTS and the retune moves it from there, which is right for running a
+       program and wrong for asking what the retune itself is responsible for.
+       rubys wanted exactly that question answered -- whether a change that
+       lowers the rate of string garbage grows the resident set because the
+       budget lets it, or for some reason that has nothing to do with the
+       budget -- and said they had not run it because they did not know the
+       knob. There was none (#4396). With `fixed`, the budget is whatever the
+       floor says and stays there, so the two emits differ by the change and
+       not by two different pacing histories. */
+    sp_gc_obj_budget_fixed = (ob && strcmp(ob, "fixed") == 0);
+    const char *sb = getenv("SPINEL_GC_STR_BUDGET");
+    sp_gc_str_budget_fixed = (sb && strcmp(sb, "fixed") == 0); }
   if (sp_gc_verify) { signal(SIGSEGV, sp_gc_fault_report); signal(SIGBUS, sp_gc_fault_report); }
 }
 
@@ -200,7 +213,7 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
  * the static header-bearing table (the 1-byte binary substrings): nothing
  * before it is an sp_gc_hdr, so reaching for one and calling its scan hook
  * jumps into the payload byte. */
-void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_ct_marked++;if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
+void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_ct_marked++;/* plain: the mark runs on the collector alone, only the SWEEP is parallel */if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
 if(sp_gc_mark_stack&&sp_gc_mark_top<sp_gc_mark_cap){sp_gc_mark_stack[sp_gc_mark_top++]=obj;}
 else{h->scan(obj);}}}
 
@@ -314,9 +327,9 @@ void (*sp_gc_obj_retune_hook)(size_t before) = NULL;
    apart, which is why a per-byte cost ratio measured on one workload did not
    carry to another (#4384). Counted, the coefficients are properties of this
    code rather than of a program's allocation sizes. */
-unsigned long long sp_gc_ct_swept = 0, sp_gc_ct_marked = 0;
+size_t sp_gc_ct_swept = 0, sp_gc_ct_marked = 0;
 static void sp_gc_sweep_young(sp_gc_hdr **pp){
-  while(*pp){sp_gc_hdr*h=*pp;sp_gc_ct_swept++;if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
+  while(*pp){sp_gc_hdr*h=*pp;SP_GC_CTR_ADD(sp_gc_ct_swept,1);if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
   else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}}
   else{*pp=h->next;h->next=sp_gc_old_heap;sp_gc_old_heap=h;h->old=1;sp_gc_old_bytes+=h->size;sp_gc_bytes+=h->size;}}
 }
@@ -337,9 +350,15 @@ void sp_gc_sweep_slot(int wid, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_
   sp_gc_hdr **pp = &sp_gc_wslot[wid].young;
   sp_gc_hdr *head = NULL, *tail = NULL;
   size_t live = 0;
+  /* Counted into a LOCAL and published once. Every worker runs this at the
+     same time, so incrementing the global per slot was a data race (found by
+     scripts/tsan-run.sh) -- and the atomic that would fix it in place is a
+     locked add per slot on one shared cache line, which is the same
+     ping-pong the parallel sweep exists to avoid. */
+  size_t swept = 0;
   while (*pp) {
     sp_gc_hdr *h = *pp;
-    sp_gc_ct_swept++;
+    swept++;
     *pp = h->next;
     if (h->marked != sp_gc_mark_gen) {
       if (h->recycle) { h->recycle(h); }
@@ -352,6 +371,7 @@ void sp_gc_sweep_slot(int wid, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_
       live += h->size;
     }
   }
+  SP_GC_CTR_ADD(sp_gc_ct_swept, swept);
   *out_head = head; *out_tail = tail; *out_bytes = live;
 }
 /* Installed by the scheduler when it can drive the parked workers; NULL means

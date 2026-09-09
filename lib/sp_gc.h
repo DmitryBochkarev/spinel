@@ -133,6 +133,8 @@ extern int sp_gc_minor_on;   /* read by sp_gc_wb below; set once before main */
    alone. Set once before main, beside the modes above; read by
    sp_gc_retune_object, which is where the reasoning lives. */
 extern int sp_gc_obj_budget_walk;
+extern int sp_gc_obj_budget_fixed;
+extern int sp_gc_str_budget_fixed;
 /* Set for the duration of the string sweep hook on a minor cycle: only the
    young string list may be swept, because the mark that just ran did not
    walk old objects and so did not reach the strings they hold. */
@@ -301,7 +303,7 @@ extern unsigned sp_gc_verify_probe;
    between them. Reported by sp_alloc.c, which is where the stats line lives. */
 /* Objects marked and slots swept since the process started. Counts are what
    the two phases' costs are actually per; see sp_gc_sweep_young. */
-extern unsigned long long sp_gc_ct_swept, sp_gc_ct_marked;
+extern size_t sp_gc_ct_swept, sp_gc_ct_marked;
 extern double sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
               sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim;
 /* The mark, split the way sp_gc_mark_all walks: this worker's own root stack,

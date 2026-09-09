@@ -49,6 +49,11 @@ size_t sp_str_old_bytes = 0;
    set a mark walks (objects + strings) rather than the object heap alone.
    Read once, beside the other boot-time GC modes. */
 int sp_gc_obj_budget_walk = 1;
+/* SPINEL_GC_OBJ_BUDGET=fixed / SPINEL_GC_STR_BUDGET=fixed: hold that heap's
+   budget at its floor instead of re-aiming it after every collection. Read
+   once beside the other boot-time GC modes; see the comment there. */
+int sp_gc_obj_budget_fixed = 0;
+int sp_gc_str_budget_fixed = 0;
 size_t sp_str_old_threshold = 1024 * 1024;
 size_t sp_str_old_threshold_init = 1024 * 1024;
 
@@ -258,7 +263,7 @@ static void sp_gc_stats_emit(void) {
      reads zero on the threaded one. */
   fprintf(stderr,
           "[gcph] marked %llu objs  swept %llu slots\n",
-          (unsigned long long)sp_gc_ct_marked, (unsigned long long)sp_gc_ct_swept);
+          (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_marked), (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_swept));
   fprintf(stderr,
           "[gcph] mark %.3fs  old sweep %.3fs  slot sweep %.3fs  "
           "remembered clear %.3fs  string sweep %.3fs  trim %.3fs  of %.3fs total\n",
@@ -280,7 +285,7 @@ static void sp_gc_stats_emit(void) {
 
 void sp_gc_retune_object(size_t before) {
   sp_gc_stats_report();
-  if (sp_gc_stress_pin) { sp_gc_threshold = sp_gc_threshold_init; return; }
+  if (sp_gc_stress_pin || sp_gc_obj_budget_fixed) { sp_gc_threshold = sp_gc_threshold_init; return; }
   size_t live = sp_gc_bytes;
   /* The budget is what may be ALLOCATED before the next collection, and what
      pays for it is what that collection COSTS. A collection marks BOTH heaps,
@@ -339,7 +344,7 @@ void sp_gc_retune_object(size_t before) {
    absolute bytes (N == 1). */
 static size_t sp_str_gate_old = 0;   /* the old total at the gate, for `before` */
 static void sp_str_retune(size_t before, size_t promoted) {
-  if (sp_gc_stress_pin) { sp_str_threshold = sp_str_threshold_init; return; }
+  if (sp_gc_stress_pin || sp_gc_str_budget_fixed) { sp_str_threshold = sp_str_threshold_init; return; }
 #ifdef SP_THREADS
   int nw = sp_active_workers; if (nw < 1) nw = 1;
   size_t after = (sp_str_bytes_total() + sp_str_old_total()) / (size_t)nw;
