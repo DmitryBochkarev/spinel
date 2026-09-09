@@ -9126,7 +9126,16 @@ static void compute_byref_out_params(Compiler *c) {
         (c->classes[s->class_id].is_struct || c->classes[s->class_id].is_native_class ||
          c->classes[s->class_id].is_value_type)) continue;
     if (s->rest_idx >= 0 || s->kwrest_idx >= 0 || s->npost_rest > 0) continue;
-    if (s->nparams <= 0 || s->nparams > 32 || s->nrequired != s->nparams) continue;
+    /* An OPTIONAL parameter beside the lent one is not an ABI difference, and
+       treating it as one dropped the callee's appends without a word (#4390).
+       The caller materialises every default, so the callee is emitted
+       fixed-arity either way: the two emits of `def fill(io, prefix = nil)`
+       and of the same method with `prefix` required differ in one token, the
+       parameter's own spelling. The default that is a lent parameter's own
+       (`def fill(io = String.new)`) passes a fresh caller-side temp, which is
+       unaliased, so the appends go nowhere -- which is what CRuby answers for
+       that shape too. */
+    if (s->nparams <= 0 || s->nparams > 32) continue;
     int pn = nt_ref(nt, s->def_node, "parameters");
     if (pn >= 0) {
       int kn = 0; nt_arr(nt, pn, "keywords", &kn);

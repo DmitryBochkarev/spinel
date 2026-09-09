@@ -7619,6 +7619,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
     for (int i = 0; i < m->nparams; i++) {
       LocalVar *plv = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
       TyKind pt = plv ? plv->type : TY_POLY;
+      int byref = plv && plv->byref_out;
       int provided = -1;
       { int slot = arg_slot_for_param(c, m, i, pos_argc);
         if (slot >= 0 && slot < pos_argc) provided = argv ? argv[slot] : -1; }
@@ -7634,11 +7635,26 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       char uniq[48];
       snprintf(uniq, sizeof uniq, "_pd%d_%d", uid, i);
       emit_indent(g_pre, g_indent);
-      emit_ctype(c, pt, g_pre);
-      buf_printf(g_pre, " lv_%s = %s;\n", uniq, vb.p ? vb.p : default_value(pt));
-      if (needs_root(pt)) {
-        emit_indent(g_pre, g_indent);
-        buf_printf(g_pre, pt == TY_POLY ? "SP_GC_ROOT_RBVAL(lv_%s);\n" : "SP_GC_ROOT(lv_%s);\n", uniq);
+      /* A lent parameter's hoist is the LENT ADDRESS, not a copy of the
+         string. emit_arg_or_default has already produced whichever of the
+         four call-site forms this argument takes (`&lv_x`, `_cell_x`, a
+         capture slot, `&_tN` for a default), all of them `const char **`,
+         so declaring it with the parameter's plain type gave
+         `const char *lv__pdN_0 = &lv_s;`. And a sibling default that READS
+         the parameter emits the cell spelling through the same rename map,
+         `(*_cell__pdN_0)`, which nothing declared. Naming the hoist
+         `_cell_<uniq>` makes the two meet, and it needs no root of its own:
+         it points at a slot the caller already roots. */
+      if (byref) {
+        buf_printf(g_pre, "const char **_cell_%s = %s;\n", uniq, vb.p ? vb.p : "NULL");
+      }
+      else {
+        emit_ctype(c, pt, g_pre);
+        buf_printf(g_pre, " lv_%s = %s;\n", uniq, vb.p ? vb.p : default_value(pt));
+        if (needs_root(pt)) {
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, pt == TY_POLY ? "SP_GC_ROOT_RBVAL(lv_%s);\n" : "SP_GC_ROOT(lv_%s);\n", uniq);
+        }
       }
       free(vb.p);
       /* Register the rename AFTER emitting temp i so param i+1's default reads
@@ -7648,7 +7664,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
         snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "%s", uniq);
         g_nren++;
       }
-      snprintf(tmpnames[i], sizeof tmpnames[0], "lv_%s", uniq);
+      snprintf(tmpnames[i], sizeof tmpnames[0], byref ? "_cell_%s" : "lv_%s", uniq);
     }
     g_nren = ren_base;  /* pop the renames before emitting the call args */
     for (int i = 0; i < m->nparams; i++) {
