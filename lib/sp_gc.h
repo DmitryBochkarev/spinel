@@ -299,6 +299,9 @@ extern unsigned sp_gc_verify_probe;
 /* Per-phase collector time, in seconds, cumulative (SPINEL_GC_PHASES=1; all
    zero when it is off). sp_gc_stat_seconds is their sum plus the bookkeeping
    between them. Reported by sp_alloc.c, which is where the stats line lives. */
+/* Objects marked and slots swept since the process started. Counts are what
+   the two phases' costs are actually per; see sp_gc_sweep_young. */
+extern unsigned long long sp_gc_ct_swept, sp_gc_ct_marked;
 extern double sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,
               sp_gc_ph_rembclear, sp_gc_ph_strsweep, sp_gc_ph_trim;
 /* The mark, split the way sp_gc_mark_all walks: this worker's own root stack,

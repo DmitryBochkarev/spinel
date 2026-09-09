@@ -257,6 +257,9 @@ static void sp_gc_stats_emit(void) {
      (sp_sweep_one_slot), so `string sweep` is the serial path's figure and
      reads zero on the threaded one. */
   fprintf(stderr,
+          "[gcph] marked %llu objs  swept %llu slots\n",
+          (unsigned long long)sp_gc_ct_marked, (unsigned long long)sp_gc_ct_swept);
+  fprintf(stderr,
           "[gcph] mark %.3fs  old sweep %.3fs  slot sweep %.3fs  "
           "remembered clear %.3fs  string sweep %.3fs  trim %.3fs  of %.3fs total\n",
           sp_gc_ph_mark, sp_gc_ph_oldsweep, sp_gc_ph_slotsweep,

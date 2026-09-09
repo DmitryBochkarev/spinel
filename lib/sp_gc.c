@@ -200,7 +200,7 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
  * the static header-bearing table (the 1-byte binary substrings): nothing
  * before it is an sp_gc_hdr, so reaching for one and calling its scan hook
  * jumps into the payload byte. */
-void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
+void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_ct_marked++;if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
 if(sp_gc_mark_stack&&sp_gc_mark_top<sp_gc_mark_cap){sp_gc_mark_stack[sp_gc_mark_top++]=obj;}
 else{h->scan(obj);}}}
 
@@ -307,8 +307,16 @@ void (*sp_gc_obj_retune_hook)(size_t before) = NULL;
 /* Minor sweep of one young list (under stop-the-world): free/recycle the dead,
    promote survivors into the shared old heap, accumulating survivor bytes into
    sp_gc_bytes and sp_gc_old_bytes (both pre-seeded by the caller). */
+/* Counts, not bytes. The sweep's cost is per SLOT -- a header touch and a
+   free -- and the mark's is per LIVE OBJECT. Sized in bytes the two are not
+   comparable across programs: a cache of large strings and a churn of small
+   arrays can hold the same megabytes with slot counts orders of magnitude
+   apart, which is why a per-byte cost ratio measured on one workload did not
+   carry to another (#4384). Counted, the coefficients are properties of this
+   code rather than of a program's allocation sizes. */
+unsigned long long sp_gc_ct_swept = 0, sp_gc_ct_marked = 0;
 static void sp_gc_sweep_young(sp_gc_hdr **pp){
-  while(*pp){sp_gc_hdr*h=*pp;if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
+  while(*pp){sp_gc_hdr*h=*pp;sp_gc_ct_swept++;if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
   else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}}
   else{*pp=h->next;h->next=sp_gc_old_heap;sp_gc_old_heap=h;h->old=1;sp_gc_old_bytes+=h->size;sp_gc_bytes+=h->size;}}
 }
@@ -331,6 +339,7 @@ void sp_gc_sweep_slot(int wid, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_
   size_t live = 0;
   while (*pp) {
     sp_gc_hdr *h = *pp;
+    sp_gc_ct_swept++;
     *pp = h->next;
     if (h->marked != sp_gc_mark_gen) {
       if (h->recycle) { h->recycle(h); }
