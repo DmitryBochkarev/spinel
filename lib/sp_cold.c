@@ -1839,9 +1839,47 @@ static void sp_file_open_raise(const char *path) {
                   : e == EEXIST ? "Errno::EEXIST" : e == EISDIR ? "Errno::EISDIR" : "SystemCallError";
   sp_raise_cls(cls, sp_sprintf("%s @ rb_sysopen - %s", strerror(e), path ? path : ""));
 }
+/* open(2) on a FIFO waits for the other end, and it waits in the kernel with
+   no descriptor to wait on. A green thread is pinned to its OS worker, so
+   that one syscall stalls every green thread pinned there, including the one
+   counting a Thread#join timeout down: the reproducer in #4394 printed
+   nothing at all, not even the join's answer.
+
+   O_NONBLOCK is the door out. A read-only open of a FIFO returns at once with
+   or without a writer, and a write-only one answers ENXIO rather than waiting,
+   which turns the wait into a loop this side of the kernel where the other
+   green threads can run. The flag is cleared before the handle is built, so
+   every read and write after this behaves exactly as it did -- and they park
+   rather than pin, because sp_io_parkable has counted a FIFO since #4307.
+
+   stat(2) does not block on a FIFO, so asking first is safe. Anything else,
+   including a path that does not exist yet, opens exactly as before and pays
+   one stat: no other shape inherits O_NONBLOCK's different answers. */
+static int sp_open_fifo_aware(const char *path, int fl, mode_t perm) {
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISFIFO(st.st_mode))
+    return open(path, fl, perm);
+  extern void sp_Thread_pass(void);
+  for (;;) {
+    int fd = open(path, fl | O_NONBLOCK, perm);
+    if (fd >= 0) {
+      int g = fcntl(fd, F_GETFL);
+      if (g >= 0) fcntl(fd, F_SETFL, g & ~O_NONBLOCK);
+      return fd;
+    }
+    /* ENXIO on a write-only open is the one answer the non-blocking form
+       invents: "no reader yet". Every other errno is the caller's, and is
+       the same errno the blocking form would have given. */
+    if (!(errno == ENXIO && (fl & O_ACCMODE) == O_WRONLY)) return -1;
+    sp_Thread_pass();
+    /* nothing else runnable: do not spin the worker. nanosleep rather than a
+       zero-fd poll, which is not portable to macOS. */
+    { struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 1000000; nanosleep(&ts, NULL); }
+  }
+}
 sp_File *sp_File_open_flags_perm(const char *path, sp_int fl, sp_int perm) {SP_GC_ROOT_STR(path);
   if (perm == SP_INT_NIL) perm = 0666;
-  int fd = open(path ? path : "", (int)fl | O_CLOEXEC, (mode_t)perm);
+  int fd = sp_open_fifo_aware(path ? path : "", (int)fl | O_CLOEXEC, (mode_t)perm);
   if (fd < 0) sp_file_open_raise(path);
   int acc = (int)fl & O_ACCMODE;
   const char *m = (acc == O_RDONLY) ? "r"
@@ -1877,7 +1915,7 @@ sp_File *sp_File_open_perm(const char *path, const char *mode, sp_int perm) {SP_
     }
   }
   if (perm == SP_INT_NIL) perm = 0666;
-  int fd = open(path ? path : "", fl | O_CLOEXEC, (mode_t)perm);
+  int fd = sp_open_fifo_aware(path ? path : "", fl | O_CLOEXEC, (mode_t)perm);
   if (fd < 0) sp_file_open_raise(path);
   /* fdopen reads its own mode grammar ("wx+" is write-only to it): hand it
      the access mode the flag word says, as the flags form does */
