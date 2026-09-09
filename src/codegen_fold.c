@@ -1879,6 +1879,15 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   emit_expr(c, recv, &rb);
   if (recv_ty == TY_POLY) buf_puts(&rb, ")");
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "const char *_t%d = ", ts); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+  /* The SUBJECT is walked across every turn of the loop below, and every turn
+     allocates: the substring before the match, the block's own value, the
+     append into the accumulator. A receiver built by this same statement --
+     `text.gsub(re) { ... }` hoists a fresh concat -- has nothing else holding
+     it, so a collection landing in one of those freed it mid-walk and
+     sp_re_match_at read the freed bytes. The accumulator below has been rooted
+     since it was written; the subject never was (#4369's rule, at the one site
+     that walks a STRING rather than an array). */
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_STR(_t%d);\n", ts);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = 0;\n", tpos);
   /* the SUBJECT's length bounds the scan, and strlen stops at an embedded
      NUL: `"a\0b".gsub(/./m) { }` walked one character and stopped. */
@@ -1891,6 +1900,9 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "const char *_t%d = %s;\n", tnd, ab.p ? ab.p : "\"\"");
     free(ab.p);
+    /* the needle is read by every strstr below, for the same reason */
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "SP_GC_ROOT_STR(_t%d);\n", tnd);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_int _t%d = (sp_int)sp_str_byte_len(_t%d);\n", tnl, tnd);
   }

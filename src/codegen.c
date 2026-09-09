@@ -1353,6 +1353,17 @@ void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
     buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.first);\n", lv->name);
     buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.last);\n", lv->name);
   }
+  /* A String slot takes the STRING root form, not the object one. Both reach
+     an ordinary heap string, but a mutable String's PAYLOAD (marker 0xfd) is
+     owned by the handle in front of it, and only sp_mark_string -- which the
+     tagged form runs -- follows the payload back to that handle. Through the
+     object form the handle goes unreferenced and its finaliser frees the bytes
+     the slot still names. Making sp_gc_mark follow it instead is not the fix:
+     0xfd is also the guard byte lib/sp_fiber.c lays in front of the static
+     root fiber precisely so that tag test SKIPS it, so the two meanings can
+     only be told apart by knowing the slot holds a string, which is what the
+     tag on the root entry says. */
+  else if (root && t == TY_STRING) buf_printf(b, "    SP_GC_ROOT_STR(lv_%s);\n", lv->name);
   else if (root && !comp_ty_value_obj(c, t)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
   else if (comp_ty_value_obj(c, t)) {
     /* a value-type local lives on the stack; root each heap-pointer (string)
@@ -1615,6 +1626,7 @@ void emit_scope_decls(Compiler *c, Scope *s, Buf *b) {
         buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.first);\n", lv->name);
         buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.last);\n", lv->name);
       }
+      else if (lv->type == TY_STRING) buf_printf(b, "    SP_GC_ROOT_STR(lv_%s);\n", lv->name);   /* see emit_local_decl */
       else if (needs_root(lv->type) && !comp_ty_value_obj(c, lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
     }
     else {
