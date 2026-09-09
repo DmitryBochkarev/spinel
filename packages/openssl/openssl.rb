@@ -119,6 +119,7 @@ module OpenSSL
       include OpenSSL::Buffering
 
       attr_accessor :hostname
+      attr_accessor :sync_close
 
       def initialize(io, context = nil)
         super()
@@ -126,6 +127,7 @@ module OpenSSL
         @context = context.nil? ? SSLContext.new : context
         @handle = -1
         @hostname = ""
+        @sync_close = false
       end
 
       def context
@@ -146,6 +148,23 @@ module OpenSSL
           raise SSLError, "SSL_connect returned an error: #{Native.last_error}"
         end
         @handle = h
+        self
+      end
+
+      # Non-blocking connect: returns the SSLSocket on completion, or
+      # :wait_readable / :wait_writable if the handshake needs the fd in
+      # that state. Matches CRuby's SSLSocket#connect_nonblock(exception:
+      # false) used by HTTP clients with a deadline.
+      def connect_nonblock(exception: true)
+        begin
+          connect
+        rescue SSLErrorWaitReadable
+          return :wait_readable unless exception
+          raise
+        rescue SSLErrorWaitWritable
+          return :wait_writable unless exception
+          raise
+        end
         self
       end
 
@@ -226,6 +245,7 @@ module OpenSSL
         return nil if @handle < 0
         Native.close(@handle)
         @handle = -1
+        @io.close if @sync_close && @io && !@io.closed?
         nil
       end
 
