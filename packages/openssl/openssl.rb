@@ -39,6 +39,8 @@ module OpenSSL
     native_func :peer_subject, [:int],                :string, "sp_ssl_peer_subject"
     native_func :version,      [:int],                :string, "sp_ssl_version"
     native_func :cipher,       [:int],                :string, "sp_ssl_cipher"
+    native_func :connect_nb,   [:int, :string, :int], :int,    "sp_ssl_connect_nb"
+    native_func :connect_cont, [:int],                :int,    "sp_ssl_connect_cont"
     native_func :read_nb,      [:int, :int],          :string, "sp_ssl_read_nb"
     native_func :want,         [],                    :int,    "sp_ssl_want"
     native_func :write_nb,     [:int, :string, :int], :int,    "sp_ssl_write_nb"
@@ -119,6 +121,10 @@ module OpenSSL
       include OpenSSL::Buffering
 
       attr_accessor :hostname
+      # sysclose takes the socket with it when this is set, which is what
+      # lets a caller hand the socket over and stop tracking it. CRuby's
+      # unset default reads back nil where this one reads false: a statically
+      # typed ivar has no third state to start in.
       attr_accessor :sync_close
 
       def initialize(io, context = nil)
@@ -151,21 +157,44 @@ module OpenSSL
         self
       end
 
-      # Non-blocking connect: returns the SSLSocket on completion, or
-      # :wait_readable / :wait_writable if the handshake needs the fd in
-      # that state. Matches CRuby's SSLSocket#connect_nonblock(exception:
-      # false) used by HTTP clients with a deadline.
+      # Non-blocking connect: answers the SSLSocket once the handshake is
+      # done, or :wait_readable / :wait_writable when it needs the descriptor
+      # in that state, which is CRuby's contract for
+      # connect_nonblock(exception: false).
+      #
+      # Call it again to resume. The first call builds the connection and
+      # takes one step; every call after that takes one more, which is why the
+      # handle is kept even though the handshake is unfinished -- there is
+      # nowhere else to hold OpenSSL's half-done state.
+      #
+      # Unlike sysread_nonblock this DOES set O_NONBLOCK on the descriptor.
+      # The handshake is the first thing on a connection, so there is no
+      # earlier call to have set it, and leaving it blocking would put the
+      # wait back in the kernel, which is the one thing this call exists to
+      # avoid.
       def connect_nonblock(exception: true)
-        begin
-          connect
-        rescue SSLErrorWaitReadable
-          return :wait_readable unless exception
-          raise
-        rescue SSLErrorWaitWritable
-          return :wait_writable unless exception
-          raise
+        if @handle < 0
+          h = Native.connect_nb(@io.fileno, @hostname,
+                                @context.verify_mode == VERIFY_NONE ? 0 : 1)
+          if h < 0
+            raise SSLError, "SSL_connect returned an error: #{Native.last_error}"
+          end
+          @handle = h
+        else
+          Native.connect_cont(@handle)
         end
-        self
+        case Native.want
+        when 0
+          self
+        when 1
+          return :wait_readable unless exception
+          raise SSLErrorWaitReadable, "read would block"
+        when 2
+          return :wait_writable unless exception
+          raise SSLErrorWaitWritable, "write would block"
+        else
+          raise SSLError, "SSL_connect returned an error: #{Native.last_error}"
+        end
       end
 
       def sysread(maxlen)

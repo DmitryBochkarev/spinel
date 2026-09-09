@@ -115,11 +115,21 @@ static sp_ssl_conn *sp_ssl_at(sp_int h) {
   return c->in_use ? c : NULL;
 }
 
-/* Open a client connection over an already-connected fd.
-   `hostname` drives both SNI and the certificate's name check; verify != 0
-   asks OpenSSL to validate the chain against the OS trust store. Returns a
-   handle, or -1 with the reason in sp_ssl_last_error. */
-sp_int sp_ssl_connect(sp_int fd, const char *hostname, sp_int verify) {
+/* Give a slot back, whatever stage it reached. */
+static void sp_ssl_release(int i) {
+  sp_ssl_conn *c = &sp_ssl_tab[i];
+  if (c->ssl) SSL_free(c->ssl);
+  if (c->ctx) SSL_CTX_free(c->ctx);
+  memset(c, 0, sizeof *c);
+}
+
+/* Everything a client connection needs EXCEPT the handshake: the slot, the
+   context, the SSL object and the descriptor. Split out because the blocking
+   and the non-blocking connect differ only in how they drive the handshake,
+   and a second copy of the verify and SNI setup would be a second place for
+   a security default to drift out of step. Answers the slot index with the
+   slot claimed, or -1 with the reason in sp_ssl_last_error. */
+static int sp_ssl_setup(sp_int fd, const char *hostname, sp_int verify) {
   int i = sp_ssl_slot();
   if (i < 0) { sp_ssl_note("too many TLS connections"); return -1; }
   sp_ssl_errbuf[0] = 0;
@@ -163,16 +173,26 @@ else {
     SSL_free(ssl); SSL_CTX_free(ctx);
     return -1;
   }
-  if (SSL_connect(ssl) != 1) {
-    sp_ssl_note("TLS handshake failed");
-    SSL_free(ssl); SSL_CTX_free(ctx);
-    return -1;
-  }
   sp_ssl_tab[i].ssl = ssl;
   sp_ssl_tab[i].ctx = ctx;
   sp_ssl_tab[i].fd  = (int)fd;
   sp_ssl_tab[i].nonblock = 0;
   sp_ssl_tab[i].in_use = 1;
+  return i;
+}
+
+/* Open a client connection over an already-connected fd, handshake included.
+   `hostname` drives both SNI and the certificate's name check; verify != 0
+   asks OpenSSL to validate the chain against the OS trust store. Returns a
+   handle, or -1 with the reason in sp_ssl_last_error. */
+sp_int sp_ssl_connect(sp_int fd, const char *hostname, sp_int verify) {
+  int i = sp_ssl_setup(fd, hostname, verify);
+  if (i < 0) return -1;
+  if (SSL_connect(sp_ssl_tab[i].ssl) != 1) {
+    sp_ssl_note("TLS handshake failed");
+    sp_ssl_release(i);
+    return -1;
+  }
   return i;
 }
 
@@ -210,6 +230,52 @@ const char *sp_ssl_read(sp_int h, sp_int maxlen) {
 static SP_TLS int sp_ssl_want_state = 0;
 
 sp_int sp_ssl_want(void) { return sp_ssl_want_state; }
+
+/* Drive the handshake ONE step against a non-blocking descriptor, and say in
+   sp_ssl_want what it wants next: 0 finished, 1 wait until readable, 2 wait
+   until writable, 4 a real failure with the reason in sp_ssl_last_error.
+   The two directions are separate because a handshake genuinely needs both,
+   and a caller waiting on the wrong one waits forever. */
+static void sp_ssl_handshake_step(sp_ssl_conn *c) {
+  sp_ssl_errbuf[0] = 0;
+  sp_ssl_want_state = 0;
+  int r = SSL_connect(c->ssl);
+  if (r == 1) return;
+  switch (SSL_get_error(c->ssl, r)) {
+    case SSL_ERROR_WANT_READ:  sp_ssl_want_state = 1; break;
+    case SSL_ERROR_WANT_WRITE: sp_ssl_want_state = 2; break;
+    default:                   sp_ssl_want_state = 4;
+                               sp_ssl_note("TLS handshake failed"); break;
+  }
+}
+
+/* Begin a client connection without waiting for the handshake to finish.
+   Unlike sp_ssl_connect this arms O_NONBLOCK on the descriptor itself: the
+   handshake is the FIRST thing on the connection, so there is no earlier
+   call to have done it, and a blocking fd here would put the wait back in
+   the kernel, which is the whole point of the call. Answers the handle as
+   soon as the connection exists -- the handshake may well be unfinished, and
+   sp_ssl_want says so -- or -1 when the connection could not be built. */
+sp_int sp_ssl_connect_nb(sp_int fd, const char *hostname, sp_int verify) {
+  int i = sp_ssl_setup(fd, hostname, verify);
+  if (i < 0) { sp_ssl_want_state = 4; return -1; }
+  sp_ssl_conn *c = &sp_ssl_tab[i];
+  int fl = fcntl(c->fd, F_GETFL, 0);
+  if (fl >= 0) fcntl(c->fd, F_SETFL, fl | O_NONBLOCK);
+  c->nonblock = 1;
+  sp_ssl_handshake_step(c);
+  return i;
+}
+
+/* Resume a handshake begun by sp_ssl_connect_nb. 1 when it is done, 0 when
+   it is not, with sp_ssl_want carrying which of the two waits, or the
+   failure. */
+sp_int sp_ssl_connect_cont(sp_int h) {
+  sp_ssl_conn *c = sp_ssl_at(h);
+  if (!c) { sp_ssl_want_state = 4; sp_ssl_note("closed TLS connection"); return 0; }
+  sp_ssl_handshake_step(c);
+  return sp_ssl_want_state == 0 ? 1 : 0;
+}
 
 /* Up to `maxlen` bytes without blocking. The fd must already be non-blocking;
    this does not set it, because the descriptor belongs to the caller's IO.
