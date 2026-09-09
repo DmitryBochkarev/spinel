@@ -214,12 +214,26 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
   if (sp_gc_verify) { signal(SIGSEGV, sp_gc_fault_report); signal(SIGBUS, sp_gc_fault_report); }
 }
 
-/* Tag byte preceding `obj`: 0xfe heap-unmarked -> 0xfc; 0xfc/0xff/0xfd/0xf1/
+/* Tag byte preceding `obj`: 0xfe heap-unmarked -> 0xfc; 0xfd a mutable
+ * String's payload, marked through the handle that owns it; 0xfc/0xff/0xf1/
  * 0xfb skipped; else a real GC object reached through its scan hook. 0xfb is
  * the static header-bearing table (the 1-byte binary substrings): nothing
  * before it is an sp_gc_hdr, so reaching for one and calling its scan hook
- * jumps into the payload byte. */
-void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_ct_marked++;/* plain: the mark runs on the collector alone, only the SWEEP is parallel */if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
+ * jumps into the payload byte.
+ *
+ * 0xfd used to be in the skip list, and that was the hole. A String's payload
+ * is freed by the HANDLE's finalizer, so a slot holding the escaped
+ * `const char *` and nothing else let the handle go unreferenced and the
+ * bytes be freed under it -- exactly what sp_mark_string was given its 0xfd
+ * branch to prevent. Both markers are reachable from a string slot: which one
+ * a slot gets depends on whether the emitter rooted it with SP_GC_ROOT_STR or
+ * with the plain SP_GC_ROOT, and the plain one is what a String-typed local
+ * and most string temporaries get. Rather than change every one of those
+ * emitters, the two markers now agree.
+ *
+ * The recursion is one level: the owner is an sp_String and takes the object
+ * path below. */
+void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfd){void*_own=(void*)(((const sp_str_hdr*)((const char*)obj-1))-1)->next;if(_own)sp_gc_mark(_own);return;}if(pm==0xfc||pm==0xff||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_ct_marked++;/* plain: the mark runs on the collector alone, only the SWEEP is parallel */if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
 if(sp_gc_mark_stack&&sp_gc_mark_top<sp_gc_mark_cap){sp_gc_mark_stack[sp_gc_mark_top++]=obj;}
 else{h->scan(obj);}}}
 
