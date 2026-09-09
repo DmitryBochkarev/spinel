@@ -145,6 +145,33 @@ extern int sp_gc_str_minor_only;
    inline. Inlining all of it cost ~5% on optcarrot, whose inner loops write
    object references per scanline. */
 void sp_gc_wb_slow(void *obj);
+/* The STICKY half of the remembered set. `sp_gc_wb` records a store the
+   barrier saw; this records a HOLDER whose stores it will not see, so the
+   entry is kept for as long as the object lives rather than cleared each
+   cycle.
+
+   The one producer is a by-reference String parameter. The callee stores
+   through `const char **_cell_x` and cannot name what owns that slot -- the
+   caller may have lent a stack local, a heap cell, a proc's capture slot or
+   an ivar -- and reading a header off a stack address to find out is exactly
+   the fault that took #4391's first half down. The owner IS nameable at the
+   lending call site, but that site runs BEFORE the store, and a barrier
+   before a call that can collect does not cover the stores after it (#4378).
+   Sticky is what makes the placement stop mattering.
+
+   Only the two forms that need it are lent: a heap cell and an ivar's owner.
+   A stack local is lent as `&lv_x`, and the caller's frame roots it for the
+   whole nest below, so nothing is pinned for it -- which is also why
+   FORWARDING a by-reference parameter pins nothing: whatever the original
+   lending site was, it already decided. */
+void sp_gc_pin_remembered_slow(void *obj);
+static inline void sp_gc_pin_remembered(void *obj) {
+  if (__builtin_expect(sp_gc_minor_on, 0)) sp_gc_pin_remembered_slow(obj);
+}
+#define SP_GC_PINNED_MAX 16384
+extern void *sp_gc_pinned[SP_GC_PINNED_MAX];
+extern int sp_gc_npinned;
+extern int sp_gc_pin_overflow;
 static inline void sp_gc_wb(void *obj) {
   /* Nothing reads the remembered set unless a minor mark runs, and whether one
      can is decided once, from the environment, before main. So with the

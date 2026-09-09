@@ -260,6 +260,49 @@ unsigned sp_gc_verify_probe = 0;
 void *sp_gc_remembered[SP_GC_REMEMBERED_MAX];
 int sp_gc_nremembered = 0;
 int sp_gc_rem_overflow = 0;
+void *sp_gc_pinned[SP_GC_PINNED_MAX];
+int sp_gc_npinned = 0;
+int sp_gc_pin_overflow = 0;
+
+/* Sticky remembered entry; see the comment on sp_gc_pin_remembered in sp_gc.h
+   for why the by-reference String ABI needs one. Same tag protocol as
+   sp_gc_wb_slow: the byte in front says whether there is a header at all, so
+   a literal, a frozen string or the static root fiber is refused rather than
+   dereferenced. The caller only ever passes a heap cell or an object it
+   named, so this is a guard and not a filter.
+
+   `pinned` makes it once per object rather than once per lending call: the
+   set is one entry per distinct holder, not per call, which is what keeps it
+   small enough to walk on every minor cycle. Overflow degrades the same way
+   the barrier's does -- to a full mark, which needs no remembered set at
+   all -- rather than silently dropping a holder. */
+void sp_gc_pin_remembered_slow(void *obj) {
+  if (!obj) return;
+  { unsigned char pm = ((unsigned char *)obj)[-1];
+    if (pm == 0xfd || pm == 0xff || pm == 0xf1 || pm == 0xf0 ||
+        pm == 0xfe || pm == 0xfc || pm == 0xfb) return; }
+  sp_gc_hdr *h = (sp_gc_hdr *)obj - 1;
+  if (h->pinned) return;
+  /* The slot is claimed BEFORE the bit goes up, which is the opposite order to
+     sp_gc_wb_slow's, and for the opposite reason. There the bit is the record
+     and the array is the index, so a bit with no entry is self-healing. Here
+     the ARRAY is the record and the bit is only a dedupe, so a bit with no
+     entry would refuse the object forever -- it would never be pinned and
+     every young string it later holds would be invisible to a minor mark. A
+     refused push therefore leaves the bit down and the object is offered
+     again on its next lending, by which time a compaction may have made
+     room. Two threads racing here can both win a slot; a duplicate entry is
+     scanned twice and costs nothing. */
+#ifdef SP_THREADS
+  { int idx = __atomic_fetch_add(&sp_gc_npinned, 1, __ATOMIC_RELAXED);
+    if (idx < SP_GC_PINNED_MAX) { sp_gc_pinned[idx] = obj; h->pinned = 1; }
+    else { __atomic_store_n(&sp_gc_pin_overflow, 1, __ATOMIC_RELAXED);
+           __atomic_store_n(&sp_gc_npinned, SP_GC_PINNED_MAX, __ATOMIC_RELAXED); } }
+#else
+  if (sp_gc_npinned < SP_GC_PINNED_MAX) { sp_gc_pinned[sp_gc_npinned++] = obj; h->pinned = 1; }
+  else sp_gc_pin_overflow = 1;
+#endif
+}
 
 void sp_gc_wb_slow(void *obj) {
   if (!obj) return;
@@ -534,7 +577,7 @@ void sp_gc_collect(void){
      coverage: it re-marks whole-heap after every minor and names the holder of
      anything the minor missed. */
   if (sp_gc_nremembered > sp_gc_rem_peak) sp_gc_rem_peak = sp_gc_nremembered;
-  sp_gc_minor = sp_gc_minor_on && !full && !sp_gc_rem_overflow;
+  sp_gc_minor = sp_gc_minor_on && !full && !sp_gc_rem_overflow && !sp_gc_pin_overflow;
   sp_gc_mark_all();
   if(sp_gc_minor){
     /* the remembered set is the rest of the root set for a minor: each entry is
@@ -544,6 +587,12 @@ void sp_gc_collect(void){
       sp_gc_hdr *rh=(sp_gc_hdr*)sp_gc_remembered[ri]-1;
       if(rh->scan) rh->scan(sp_gc_remembered[ri]);
     }
+    /* and the sticky half: holders whose stores the barrier never sees, so
+       there is no cycle in which they are "already recorded" */
+    for(int pi=0;pi<sp_gc_npinned;pi++){
+      sp_gc_hdr *ph=(sp_gc_hdr*)sp_gc_pinned[pi]-1;
+      if(ph->scan) ph->scan(sp_gc_pinned[pi]);
+    }
     sp_gc_mark_drain();
   }
   sp_gc_minor = 0;
@@ -552,6 +601,27 @@ void sp_gc_collect(void){
      record -- the one failure mode of this design, silent until it is a use
      after free. Off unless SPINEL_GC_VERIFY_GEN is set. */
   if(!full && sp_gc_verify_gen) sp_gc_verify_gen_run();
+  /* Drop pinned holders that are about to be freed, while the marks are final
+     and before any sweep runs -- an entry naming freed memory would be
+     dereferenced on the next minor cycle. What a cycle can free decides the
+     test: a full one frees anything unmarked, and a minor one frees only from
+     the young lists, so an old holder survives it whatever its stamp says.
+     Clearing the bit on the way out is what lets the object be pinned again
+     if it turns out to be alive after all -- it cannot, since it is being
+     freed, but the bit and the array must not disagree. */
+  { int keep = 0;
+    for (int pi = 0; pi < sp_gc_npinned; pi++) {
+      sp_gc_hdr *ph = (sp_gc_hdr *)sp_gc_pinned[pi] - 1;
+      int live = full ? (ph->marked == sp_gc_mark_gen)
+                      : (ph->old || ph->marked == sp_gc_mark_gen);
+      if (live) sp_gc_pinned[keep++] = sp_gc_pinned[pi];
+      else ph->pinned = 0;
+    }
+    sp_gc_npinned = keep;
+    /* The overflow degradation lasts exactly as long as the array is full.
+       While it is set every mark is whole-heap, so nothing is missed; once
+       compaction has made room the set is authoritative again. */
+    if (sp_gc_pin_overflow && keep < SP_GC_PINNED_MAX) sp_gc_pin_overflow = 0; }
   SP_GC_PH(sp_gc_ph_mark);
   if(full){
     size_t old_before=sp_gc_old_bytes;

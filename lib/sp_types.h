@@ -204,14 +204,22 @@ typedef struct{const char *name;}sp_Encoding;
    full-list walks (old unmark + minor re-mark) that made every minor
    collection O(live) even when the live set was untouched. 0 never equals a
    generation (the counter skips it), so freshly-calloc'd headers are unmarked. */
-typedef struct sp_gc_hdr { struct sp_gc_hdr *next; void (*finalize)(void *); void (*scan)(void *); size_t size; unsigned marked : 29; unsigned frozen : 1;
+typedef struct sp_gc_hdr { struct sp_gc_hdr *next; void (*finalize)(void *); void (*scan)(void *); size_t size; unsigned marked : 28; unsigned frozen : 1; unsigned pinned : 1;
    /* `old` says the object has survived a sweep and lives on the old list, so
       a reference stored into it may point at a younger object a minor mark
       would not reach on its own; `dirty` says it is already on the remembered
       set, so the write barrier's push happens once per collection rather than
       once per store. `marked` gives up a bit for them: it is a wrapping
-      generation counter whose wrap path re-clears every stamp, and 2^29
-      collections between wraps is far past anything real. */
+      generation counter whose wrap path re-clears every stamp, and 2^28
+      collections between wraps is far past anything real.
+
+      `pinned` says the object is on sp_gc_pinned, the STICKY half of the
+      remembered set. `dirty` records a store the barrier saw and is cleared
+      every cycle; `pinned` records a holder whose stores the barrier cannot
+      see at all, so it is never cleared while the object lives. The one
+      producer is a by-reference String parameter: the callee stores through a
+      cell it cannot name the owner of, and the owner is only nameable at the
+      lending call site, which is BEFORE the store rather than after (#4391). */
    unsigned old : 1; unsigned dirty : 1; void (*recycle)(struct sp_gc_hdr *); } sp_gc_hdr;
 /* size/len packed to uint32 (4 GB per-string cap, far beyond any real
    string) so the cached FNV `hash` fits without growing the 24-byte

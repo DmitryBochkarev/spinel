@@ -6320,13 +6320,32 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
       const char *aty = nt_type(c->nt, provided);
       if (aty && sp_streq(aty, "LocalVariableReadNode")) {
         const char *vn = nt_str(c->nt, provided, "name");
+        LocalVar *clv0 = vn ? scope_local(comp_scope_of(c, provided), vn) : NULL;
+        /* Forwarding a by-reference parameter pins nothing: the cell is
+           whatever the ORIGINAL lending site handed down, and that site
+           already decided. Pinning here would offer a stack address to
+           sp_gc_pin_remembered, which reads a header off it -- the fault
+           #4391's first half was. */
+        int fwd = clv0 && clv0->byref_out;
         if (g_cap_struct && g_cap_names && vn && nameset_has(g_cap_names, vn)) {
           /* inside a proc body: the capture struct holds the cell pointer */
+          if (!fwd) {
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_gc_pin_remembered((void *)((%s *)_cap)->c_%s);\n",
+                       g_cap_struct, vn);
+          }
           buf_printf(out, "((%s *)_cap)->c_%s", g_cap_struct, vn);
           return;
         }
-        LocalVar *clv = vn ? scope_local(comp_scope_of(c, provided), vn) : NULL;
+        LocalVar *clv = clv0;
         if (clv && clv->type == TY_STRING && clv->is_cell) {
+          /* a heap cell: the callee stores through it and cannot name it, so
+             the owner is recorded HERE, stickily, since this runs before the
+             store rather than after (#4391) */
+          if (!fwd) {
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_gc_pin_remembered((void *)_cell_%s);\n", vn);
+          }
           buf_printf(out, "_cell_%s", vn);
           return;
         }
@@ -6336,8 +6355,9 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
         }
       }
       /* an IVAR argument: pass the slot itself so the callee's append lands in
-         the object. The generational barrier is order-independent (it only
-         marks the owner dirty), so it goes in the prelude. */
+         the object. The owner is pinned rather than marked dirty, because the
+         store happens inside the callee and a dirty bit set before the call
+         is cleared by any collection the call makes (#4378). */
       if (aty && sp_streq(aty, "InstanceVariableReadNode")) {
         const char *ivn = nt_str(c->nt, provided, "name");
         Scope *ivs = comp_scope_of(c, provided);
@@ -6346,22 +6366,15 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
           /* a value-type receiver is a struct, not a heap object: it has no
              header to mark dirty, and casting it to void* does not compile */
           if (!comp_ty_value_obj(c, ty_object(ivs->class_id))) {
-            /* BEFORE the call, which by the rule #4378 established does not
-               cover the store: the callee's append allocates, a collection
-               there clears every dirty bit and empties the remembered set,
-               and the store that follows is unrecorded. It is nonetheless
-               not a live fault, and the reason is worth writing down rather
-               than rediscovering: the string heap sweeps only on a FULL
-               cycle, so a young string reachable solely through an old object
-               is never freed by a minor one. The record this misses is a
-               record nothing reads.
-               It becomes live the day strings sweep on a minor cycle, and the
-               fix is not local -- the emitter has no post-call hook, and
-               giving it one is the same work as deciding what a byref slot
-               is (a lent address, or always a heap cell). Left with the
-               design question rather than papered over here. */
+            /* Sticky, not dirty. This runs before the call and the store is
+               inside it, so a dirty bit set here is cleared by any collection
+               the call makes and the store that follows is unrecorded (the
+               rule #4378 established). A pinned owner is scanned on every
+               minor cycle for as long as it lives, which makes the placement
+               stop mattering -- and it is the only thing that can, since the
+               callee holds a slot address and cannot name what owns it. */
             emit_indent(g_pre, g_indent);
-            buf_printf(g_pre, "sp_gc_wb((void *)%s);\n", g_self);
+            buf_printf(g_pre, "sp_gc_pin_remembered((void *)%s);\n", g_self);
           }
           buf_printf(out, "&%s%siv_%s", g_self, g_self_deref, iv_c(ivn + 1));
           return;

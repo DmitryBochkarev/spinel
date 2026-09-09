@@ -913,7 +913,8 @@ byref-capture-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_retval.rb \
                   test/gc_minor_thread_tls_first_write.rb \
-                  test/proc_cell_capture_marked.rb
+                  test/proc_cell_capture_marked.rb \
+                  test/gc_minor_byref_lent_slot.rb
 
 gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcminor.XXXXXX); ok=1; \
