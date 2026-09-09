@@ -249,15 +249,6 @@ module OpenSSL
         nil
       end
 
-      # CRuby-compatible aliases. The native methods are named sys* to leave
-      # the unprefixed names free for the buffering wrappers in
-      # OpenSSL::Buffering, but callers that bypass buffering (e.g. an HTTP
-      # client driving the socket directly) want the plain names.
-      alias_method :read_nonblock, :sysread_nonblock
-      alias_method :read, :sysread
-      alias_method :write, :syswrite
-      alias_method :close, :sysclose
-
       def peer_subject
         @handle < 0 ? "" : Native.peer_subject(@handle)
       end
