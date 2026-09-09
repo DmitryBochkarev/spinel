@@ -45,10 +45,14 @@ size_t sp_str_heap_bytes = 0;
 sp_str_hdr *sp_str_old = NULL;
 size_t sp_str_old_bytes = 0;
 #endif
-/* SPINEL_GC_OBJ_BUDGET=walk: size the object collection budget from the whole
-   set a mark walks (objects + strings) rather than the object heap alone.
+/* SPINEL_GC_OBJ_BUDGET: how much of the mark set the object collection budget
+   is priced from. 0 = the object heap alone (`obj`), 1 = the whole set a mark
+   walks (`walk`), 2 = gated on what the last collection cost (the default).
    Read once, beside the other boot-time GC modes. */
-int sp_gc_obj_budget_walk = 1;
+int sp_gc_obj_budget_mode = 2;
+/* The last gate decision, in 1024ths, so the stats line can report it and a
+   test can read it. 1024 is `walk`, 0 is `obj`. */
+size_t sp_gc_obj_alpha1024 = 1024;
 /* SPINEL_GC_OBJ_BUDGET=fixed / SPINEL_GC_STR_BUDGET=fixed: hold that heap's
    budget at its floor instead of re-aiming it after every collection. Read
    once beside the other boot-time GC modes; see the comment there. */
@@ -248,13 +252,15 @@ static void sp_gc_stats_emit(void) {
 #endif
   fprintf(stderr,
           "[gc] %llu collections (%llu full) in %.2fs of %.1fs wall (%.1f%%), %.2fms avg; "
-          "live %.1f MB obj + %.1f MB str; trigger %.1f MB obj + %.2f MB str/worker x %d\n",
+          "live %.1f MB obj + %.1f MB str; trigger %.1f MB obj + %.2f MB str/worker x %d; "
+          "mark share %.2f\n",
           n, sp_gc_stat_fulls, sp_gc_stat_seconds, wall,
           wall > 0 ? 100.0 * sp_gc_stat_seconds / wall : 0.0,
           n ? 1000.0 * sp_gc_stat_seconds / (double)n : 0.0,
           (double)SP_GC_CTR_GET(sp_gc_bytes) / 1048576.0, (double)sbytes / 1048576.0,
           (double)SP_GC_CTR_GET(sp_gc_threshold) / 1048576.0,
-          (double)SP_GC_CTR_GET(sp_str_threshold) / 1048576.0, nw);
+          (double)SP_GC_CTR_GET(sp_str_threshold) / 1048576.0, nw,
+          (double)sp_gc_obj_alpha1024 / 1024.0);
   if (!sp_gc_ph_on) return;
   /* Which part of a collection cost that time. The names are the ones the
      collector's own comments use, so a number leads to the code that spent it.
@@ -307,13 +313,62 @@ void sp_gc_retune_object(size_t before) {
      at both ends of a 3.3x concurrency swing. A fixed number cannot be.
      Our own 61 benchmarks and optcarrot are neutral on it: same wall, RSS
      within 0.5%, fps inside its spread.
-     Known cost, and the next thing to fix: it widens the budget by the mark
-     set whether or not the mark is what the program is paying for. Two
-     synthetics here that hold a large live string set while collecting
-     cheaply pay memory for nothing. Gating the widening on a measured mark
-     cost is the better policy and does not exist yet. */
+     What it cost, before the gate below: it widened the budget by the mark
+     set whether or not the mark was what the program paid for. Two synthetics
+     here that hold a large live string set while collecting cheaply paid
+     memory for nothing. */
+
+  /* ---- the gate: widen by the share of the collection the MARK is ----
+
+     alpha is that share, and the budget widens by alpha x the string live
+     set. A program whose collections are nearly all mark gets `walk`; one
+     whose collections are nearly all sweep gets `obj`; the two synthetics and
+     rubys' server sit at opposite ends of it rather than needing different
+     defaults.
+
+     COUNTS, not bytes. A cost ratio taken per byte does not carry between
+     programs: a cache of large strings and a churn of small arrays hold the
+     same megabytes with slot counts fifty times apart, which is how the first
+     attempt at this failed (#4384). The sweep's cost is per SLOT and the
+     mark's is per LIVE OBJECT, so counted, the coefficients are properties of
+     this code rather than of a program's allocation sizes.
+
+     And the coefficient is an ORDER, not a measurement. Measured here, mark
+     is ~360-560 ns an object and sweep is ~8 ns a slot serially against ~120
+     ns across eight workers, where the parked-worker coordination and the
+     string sweep fold in. Writing those numbers down would pin this machine's
+     ratio into the collector and be wrong on the next one. Written as the
+     order they sit at -- Cm/Cs is about 64 serially and about 4 in parallel --
+     the arithmetic is a shift and the answer barely moves: on the pair that
+     motivated the gate, the measured coefficients give alpha 0.012 and 0.57,
+     the orders give 0.016 and 0.55. The decision was never close enough for
+     the precision to matter, which is the argument for not claiming it. */
+  static size_t prev_marked = 0, prev_swept = 0;
+  size_t cmk = SP_GC_CTR_GET(sp_gc_ct_marked), csw = SP_GC_CTR_GET(sp_gc_ct_swept);
+  size_t marked = cmk > prev_marked ? cmk - prev_marked : 0;
+  size_t swept  = csw > prev_swept  ? csw - prev_swept  : 0;
+  prev_marked = cmk; prev_swept = csw;
+  size_t alpha = 1024;   /* nothing measured yet: widen, which is what `walk` did */
+  {
+    int nw = 1;
+#ifdef SP_THREADS
+    nw = sp_active_workers; if (nw < 1) nw = 1;
+#endif
+    /* The parallel sweep pays for parking and waking the workers that help it,
+       and folds the string sweep in, so a slot costs an order more there. */
+    size_t k = (nw > 1) ? 4u : 64u;
+    if (marked || swept) {
+      size_t num = k * marked, den = num + swept;
+      alpha = den ? (num * 1024) / den : 1024;
+      if (alpha > 1024) alpha = 1024;
+    }
+  }
+  if (sp_gc_obj_budget_mode == 0) alpha = 0;
+  else if (sp_gc_obj_budget_mode == 1) alpha = 1024;
+  sp_gc_obj_alpha1024 = alpha;
   size_t walk = live;
-  if (sp_gc_obj_budget_walk) walk += sp_str_live_total();
+  { size_t str = sp_str_live_total();
+    walk += (str / 1024) * alpha + ((str % 1024) * alpha) / 1024; }
   /* saturating: the live counter is a heuristic and is allowed to lag, so it
      can read above the pre-collect total. Wrapping made `freed` enormous, the
      productive-sweep test went false, and the threshold was taken from a live

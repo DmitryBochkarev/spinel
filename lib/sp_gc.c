@@ -191,7 +191,13 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
   /* Read here rather than in sp_alloc_worker_tune, which a single-threaded
      program never calls: the budget policy is not a threads-only question. */
   { const char *ob = getenv("SPINEL_GC_OBJ_BUDGET");
-    sp_gc_obj_budget_walk = (ob && strcmp(ob, "obj") == 0) ? 0 : 1;
+    /* The default GATES the widening on what the last collection actually
+       cost, rather than widening always (`walk`) or never (`obj`). Both of
+       those are kept, because a measurement wants to be able to pin the
+       policy at either end. */
+    sp_gc_obj_budget_mode = (ob && strcmp(ob, "obj") == 0)  ? 0
+                          : (ob && strcmp(ob, "walk") == 0) ? 1
+                          : 2;
     /* PINNED, not floored. SPINEL_GC_THRESHOLD_*_KB sets where the budget
        STARTS and the retune moves it from there, which is right for running a
        program and wrong for asking what the retune itself is responsible for.
@@ -626,7 +632,7 @@ void sp_gc_collect(void){
   if(full){
     size_t old_before=sp_gc_old_bytes;
     sp_gc_hdr**pp=&sp_gc_old_heap;sp_gc_old_bytes=0;
-    while(*pp){sp_gc_hdr*h=*pp;if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
+    while(*pp){sp_gc_hdr*h=*pp;SP_GC_CTR_ADD(sp_gc_ct_swept,1);if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
     else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}}
     else{h->dirty=0;sp_gc_old_bytes+=h->size;pp=&h->next;}}
     /* Retune the cadence on what this sweep actually reclaimed. A heap the

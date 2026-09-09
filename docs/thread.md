@@ -125,7 +125,7 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_THRESHOLD_KB` | per-worker collection budget; raise it to trade memory for fewer stop-the-world pauses (default 256) |
 | `SPINEL_GC_THRESHOLD_OBJ_KB` | the same budget for the OBJECT heap alone, overriding the pair above |
 | `SPINEL_GC_THRESHOLD_STR_KB` | the same for the STRING heap alone |
-| `SPINEL_GC_OBJ_BUDGET` | `obj` prices the object budget off the object heap alone, as spinel did before 2026-09-09. The default prices it off everything a mark walks, objects plus strings. `fixed` stops re-aiming it after each collection and holds it at its floor |
+| `SPINEL_GC_OBJ_BUDGET` | the default GATES the widening on what the last collection cost. `obj` pins it off (the object heap alone, as spinel did before 2026-09-09), `walk` pins it on (everything a mark walks). `fixed` is a separate axis: it stops re-aiming the budget after each collection and holds it at its floor |
 | `SPINEL_GC_STR_BUDGET` | `fixed` does the same for the STRING budget |
 
 The three `_KB` variables set where a budget STARTS; the collector re-aims it
@@ -172,11 +172,38 @@ prefer it over that floor is that it tracks: it settles around 70-78 MB where
 the floor would pin 128, and around 227-253 MB where the floor would be too
 small. Any fixed number is wrong at one end of a concurrency range.
 
-What it does not do is ask whether the mark is what you are paying for. It
-widens the budget by the mark set either way, so a program that holds a large
-live string set while collecting cheaply pays memory and gets nothing back.
-`obj` is the answer for that shape until the budget learns to read the mark's
-actual cost.
+Since 2026-09-10 it also asks whether the mark is what you are paying for,
+which the first version of this did not: it widened the budget by the mark set
+either way, so a program holding a large live string set while collecting
+cheaply paid memory and got nothing back.
+
+The budget now widens by `alpha` times the string live set, where `alpha` is
+the share of a collection the MARK is. `SPINEL_GC_STATS=1` reports it as
+`mark share` on the `[gc]` line, so the policy a program is getting is
+readable rather than inferred. A program whose collections are nearly all mark
+gets what `walk` pins by hand; one whose collections are nearly all sweep gets
+what `obj` pins; the two sit at opposite ends of one number instead of needing
+different settings.
+
+Two things about how alpha is computed are worth knowing, because both were
+arrived at the hard way.
+
+It is counted in OBJECTS MARKED and SLOTS SWEPT, not bytes. A cost ratio taken
+per byte does not carry between programs: a cache of large strings and a churn
+of small arrays hold the same megabytes with slot counts fifty times apart.
+The sweep's cost is per slot and the mark's is per live object, so counted,
+the coefficients belong to the collector rather than to a program's allocation
+sizes.
+
+And the coefficient relating them is an ORDER rather than a measurement.
+Measured on one machine, a mark is 360-560 ns an object and a slot sweep is
+about 8 ns serially against about 120 ns across eight workers, where the
+parked-worker coordination and the string sweep fold in. Writing those numbers
+down would pin one machine's ratio into the collector. Written as the order
+they sit at -- about 64 serially, about 4 in parallel -- the answer barely
+moves: on the pair of programs that motivated the gate the measured
+coefficients give 0.012 and 0.57, the orders give 0.016 and 0.55. The decision
+was never close enough for the precision to be worth claiming.
 
 ### A note on allocation-heavy threads
 

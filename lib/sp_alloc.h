@@ -640,7 +640,8 @@ static inline sp_float sp_poly_as_float_or_nil(sp_RbVal v) {
    keep resolving the same symbol. */
 /* SPINEL_GC_OBJ_BUDGET=walk: the object budget is priced off the whole set a
    mark walks, not the object heap alone. Opt-in; see sp_gc_retune_object. */
-extern int sp_gc_obj_budget_walk;
+extern int sp_gc_obj_budget_mode;
+extern size_t sp_gc_obj_alpha1024;
 extern int sp_gc_obj_budget_fixed;
 extern int sp_gc_str_budget_fixed;
 extern size_t sp_gc_threshold;

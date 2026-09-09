@@ -874,23 +874,39 @@ gc-threshold-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 # moments, which is what made a cross-run version of this flake.
 gc-obj-budget-test: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcobj.XXXXXX); ok=1; \
-	$(SPINEL) test/gc_obj_budget_walk.rb -o "$$tmp/w" >/dev/null 2>&1 || \
-	  { echo "gc-obj-budget-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
-	SPINEL_GC_OBJ_BUDGET=obj SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/w" > "$$tmp/d.out" 2> "$$tmp/d.err"; \
-	SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/w" > "$$tmp/w.out" 2> "$$tmp/w.err"; \
-	cmp -s "$$tmp/d.out" test/gc_obj_budget_walk.rb.expected || \
-	  { echo "gc-obj-budget-test: FAIL (OBJ_BUDGET=obj output)"; ok=0; }; \
-	cmp -s "$$tmp/w.out" test/gc_obj_budget_walk.rb.expected || \
-	  { echo "gc-obj-budget-test: FAIL (the default changed the answer)"; ok=0; }; \
 	str_of() { sed -n 's/.*+ \([0-9.]*\) MB str; trigger.*/\1/p' "$$1" | tail -1; }; \
 	trg_of() { sed -n 's/.*trigger \([0-9.]*\) MB obj.*/\1/p' "$$1" | tail -1; }; \
-	ds=$$(str_of "$$tmp/d.err"); dt=$$(trg_of "$$tmp/d.err"); \
-	ws=$$(str_of "$$tmp/w.err"); wt=$$(trg_of "$$tmp/w.err"); \
-	[ -n "$$ds" ] && [ -n "$$wt" ] || { echo "gc-obj-budget-test: FAIL (no trigger line)"; ok=0; }; \
-	awk -v t="$$dt" -v s="$$ds" 'BEGIN{exit !(t < s)}' || \
-	  { echo "gc-obj-budget-test: FAIL (OBJ_BUDGET=obj still saw the strings: trigger $$dt vs live str $$ds)"; ok=0; }; \
+	for prog in gc_obj_budget_walk gc_obj_budget_mark; do \
+	  $(SPINEL) test/$$prog.rb -o "$$tmp/$$prog" >/dev/null 2>&1 || \
+	    { echo "gc-obj-budget-test: FAIL ($$prog: compile)"; ok=0; continue; }; \
+	  for mode in default walk obj; do \
+	    if [ "$$mode" = default ]; then unset SPINEL_GC_OBJ_BUDGET; \
+	    else SPINEL_GC_OBJ_BUDGET=$$mode; export SPINEL_GC_OBJ_BUDGET; fi; \
+	    SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/$$prog" > "$$tmp/$$prog.$$mode.out" 2> "$$tmp/$$prog.$$mode.err"; \
+	    cmp -s "$$tmp/$$prog.$$mode.out" test/$$prog.rb.expected || \
+	      { echo "gc-obj-budget-test: FAIL ($$prog: $$mode changed the answer)"; ok=0; }; \
+	  done; \
+	  unset SPINEL_GC_OBJ_BUDGET; \
+	done; \
+	ws=$$(str_of "$$tmp/gc_obj_budget_walk.obj.err"); \
+	ot=$$(trg_of "$$tmp/gc_obj_budget_walk.obj.err"); \
+	wt=$$(trg_of "$$tmp/gc_obj_budget_walk.walk.err"); \
+	gt=$$(trg_of "$$tmp/gc_obj_budget_walk.default.err"); \
+	mo=$$(trg_of "$$tmp/gc_obj_budget_mark.obj.err"); \
+	mw=$$(trg_of "$$tmp/gc_obj_budget_mark.walk.err"); \
+	mg=$$(trg_of "$$tmp/gc_obj_budget_mark.default.err"); \
+	[ -n "$$ws" ] && [ -n "$$wt" ] && [ -n "$$gt" ] && [ -n "$$mg" ] || \
+	  { echo "gc-obj-budget-test: FAIL (no trigger line)"; ok=0; }; \
+	awk -v t="$$ot" -v s="$$ws" 'BEGIN{exit !(t < s)}' || \
+	  { echo "gc-obj-budget-test: FAIL (obj still saw the strings: trigger $$ot vs live str $$ws)"; ok=0; }; \
 	awk -v t="$$wt" -v s="$$ws" 'BEGIN{exit !(t > s)}' || \
-	  { echo "gc-obj-budget-test: FAIL (the default did not price in the strings: trigger $$wt vs live str $$ws)"; ok=0; }; \
+	  { echo "gc-obj-budget-test: FAIL (walk did not price in the strings: trigger $$wt vs live str $$ws)"; ok=0; }; \
+	awk -v g="$$gt" -v w="$$wt" 'BEGIN{exit !(g < w)}' || \
+	  { echo "gc-obj-budget-test: FAIL (the gate widened a sweep-bound program: $$gt vs walk $$wt)"; ok=0; }; \
+	awk -v g="$$mg" -v o="$$mo" 'BEGIN{exit !(g > o)}' || \
+	  { echo "gc-obj-budget-test: FAIL (the gate did not widen a mark-bound program: $$mg vs obj $$mo)"; ok=0; }; \
+	awk -v g="$$mg" -v w="$$mw" 'BEGIN{exit !(g > 0.99 * w)}' || \
+	  { echo "gc-obj-budget-test: FAIL (the gate fell short of walk on a mark-bound program: $$mg vs walk $$mw)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-obj-budget-test: pass"; else exit 1; fi
 
