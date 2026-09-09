@@ -2354,10 +2354,31 @@ void sp_Mutex_unlock(sp_mutex *m) {
       if (__atomic_load_n(&m->nwaiters, __ATOMIC_SEQ_CST) == 0) return;
       /* A waiter counted itself while we were releasing. It is parked, or is
          about to look at `owner` one more time and take it; either way the
-         list is the authority, so finish the hand-off under the lock. */
+         list is the authority, so finish the hand-off under the lock.
+
+         The hand-off has to be a compare-exchange, not a load and a store.
+         The lock's own fast path takes a free mutex WITHOUT the scheduler
+         lock, so a third thread can claim it between the load that finds it
+         free and the store that gives it to the waiter -- and the store then
+         puts the waiter's name over that owner, leaving TWO threads inside
+         the critical section. Which of them notices is whichever unlocks
+         second: its fast-path exchange fails, and it raises "Attempt to
+         unlock a mutex which is not locked" against a mutex it really did
+         hold. Reproduced with eight workers on a hot lock, roughly one run in
+         five.
+
+         The waiter is peeked rather than woken first, so a failed exchange
+         leaves it on the list where it was. Nothing is lost by declining: a
+         listed waiter is a counted one, so the thread that won the race sees
+         nwaiters > 0 and cannot take this fast path when it unlocks. */
       SCHED_LOCK();
-      if (__atomic_load_n(&m->owner, __ATOMIC_SEQ_CST) == NULL && m->waiters)
-        __atomic_store_n(&m->owner, sp_sched_wake_one(&m->waiters), __ATOMIC_SEQ_CST);
+      if (m->waiters) {
+        sp_thread *w = m->waiters;
+        sp_thread *free_now = NULL;
+        if (__atomic_compare_exchange_n(&m->owner, &free_now, w, 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+          sp_sched_wake_one(&m->waiters);   /* removes exactly w, now that it owns */
+      }
       SCHED_UNLOCK();
       return;
     }
