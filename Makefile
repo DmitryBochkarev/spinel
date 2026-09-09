@@ -44,7 +44,7 @@ RBS_LIB      = build/librbs.a
 
 .PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
-        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test threaded-render-test \
+        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test threaded-render-test gc-locality-test \
         gate-optcarrot clean install uninstall deps tools
 
 # `make all` includes the RBS extractor when vendor/rbs has been fetched
@@ -697,7 +697,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test threaded-render-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test threaded-render-test gc-locality-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -925,6 +925,51 @@ byref-capture-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	  { echo "byref-capture-test: FAIL (output differs)"; diff -u test/rbs-seed/byref_capture_scan.expected "$$tmp/out" | head -5; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "byref-capture-test: pass"; else exit 1; fi
+
+# ---- Allocation locality: the same graph, laid down by 1 worker or by N ----
+# test/gc_locality_build.rb answers what the mark split in #4384 left open. The
+# root walk is 0.000 s at every worker count, so the mark's rise with workers
+# is the trace; this separates "who allocated the graph" from "who marks it" by
+# holding the second still and varying the first. Measured on the ladder in its
+# header, the per-object trace cost is set by the number of workers that
+# ALLOCATED -- 3.74 ns at one, 5.56 at two, and flat out to sixteen.
+#
+# What is gated here is the correctness half of that, which is worth having on
+# its own: a graph built across N workers must BE the graph built by one. The
+# checksum is over the whole structure, so a node allocated on one worker and
+# published to another without the store being seen -- or a slot recycled while
+# still reachable -- changes it. That is the shape of three of the defects this
+# workload family has found, and none of them crashed.
+#
+# The collection floor is here for the same reason as in threaded-render-test:
+# an arm that stops collecting still prints the right checksum and defends
+# nothing.
+GC_LOCALITY_SRC := test/gc_locality_build.rb
+
+gc-locality-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+	@tmp=$$(mktemp -d /tmp/spinel-gcloc.XXXXXX); ok=1; \
+	$(SPINEL) $(GC_LOCALITY_SRC) -o "$$tmp/l" >/dev/null 2>&1 || \
+	  { echo "gc-locality-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	for b in 1 2 4; do \
+	  for w in 1 8; do \
+	    LOCALITY_BUILD=$$b SPINEL_WORKERS=$$w $(TIMEOUT60) "$$tmp/l" > "$$tmp/out.$$b.$$w" 2>/dev/null || \
+	      { echo "gc-locality-test: FAIL (build=$$b W=$$w: exited non-zero)"; ok=0; continue; }; \
+	    cmp -s "$$tmp/out.$$b.$$w" $(GC_LOCALITY_SRC).expected || \
+	      { echo "gc-locality-test: FAIL (build=$$b W=$$w changed the answer: that arm is not the same graph)"; \
+	        diff -u $(GC_LOCALITY_SRC).expected "$$tmp/out.$$b.$$w" | head -6; ok=0; }; \
+	  done; \
+	done; \
+	SPINEL_WORKERS=8 LOCALITY_BUILD=4 SPINEL_GC_PHASES=1 $(TIMEOUT60) "$$tmp/l" >/dev/null 2> "$$tmp/ph.err"; \
+	colls=$$(sed -n 's/^\[gc\] \([0-9]*\) collections.*/\1/p' "$$tmp/ph.err" | tail -1); \
+	marked=$$(sed -n 's/^\[gcph\] marked \([0-9]*\) objs.*/\1/p' "$$tmp/ph.err" | tail -1); \
+	[ -n "$$colls" ] && [ -n "$$marked" ] || \
+	  { echo "gc-locality-test: FAIL (no [gc]/[gcph] line under SPINEL_GC_PHASES)"; ok=0; colls=0; marked=0; }; \
+	[ "$$colls" -ge 8 ] || \
+	  { echo "gc-locality-test: FAIL (only $$colls collections: the churn stopped reaching the collector)"; ok=0; }; \
+	awk -v m="$$marked" -v c="$$colls" 'BEGIN{exit !(c > 0 && m / c > 5000)}' || \
+	  { echo "gc-locality-test: FAIL (mark walks $$marked objs over $$colls collections: the graph is not being held live)"; ok=0; }; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "gc-locality-test: pass"; else exit 1; fi
 
 # ---- The threaded render benchmark, as a correctness gate (#4384) ----
 # benchmark/bm_threaded_render.rb is the only workload in the tree that runs
