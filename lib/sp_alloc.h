@@ -638,6 +638,9 @@ static inline sp_float sp_poly_as_float_or_nil(sp_RbVal v) {
    sp_gc_alloc itself is an external function (defined in sp_alloc.c) so the
    cold lib C files that already link it (sp_fiber.c, sp_io.c, sp_bigint.c)
    keep resolving the same symbol. */
+/* SPINEL_GC_OBJ_BUDGET=walk: the object budget is priced off the whole set a
+   mark walks, not the object heap alone. Opt-in; see sp_gc_retune_object. */
+extern int sp_gc_obj_budget_walk;
 extern size_t sp_gc_threshold;
 extern size_t sp_gc_threshold_init;
 extern int sp_gc_stress_checked;

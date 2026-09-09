@@ -45,6 +45,10 @@ size_t sp_str_heap_bytes = 0;
 sp_str_hdr *sp_str_old = NULL;
 size_t sp_str_old_bytes = 0;
 #endif
+/* SPINEL_GC_OBJ_BUDGET=walk: size the object collection budget from the whole
+   set a mark walks (objects + strings) rather than the object heap alone.
+   Read once, beside the other boot-time GC modes. */
+int sp_gc_obj_budget_walk = 0;
 size_t sp_str_old_threshold = 1024 * 1024;
 size_t sp_str_old_threshold_init = 1024 * 1024;
 
@@ -57,6 +61,16 @@ static size_t sp_str_old_total(void) {
   return t;
 #else
   return SP_GC_CTR_GET(sp_str_old_bytes);
+#endif
+}
+
+/* Every live string byte, young and old, in either build. Both retunes need it
+   and the young half is spelled differently with and without threads. */
+static size_t sp_str_live_total(void) {
+#ifdef SP_THREADS
+  return sp_str_bytes_total() + sp_str_old_total();
+#else
+  return sp_str_heap_bytes + sp_str_old_total();
 #endif
 }
 size_t sp_str_threshold = 256 * 1024;
@@ -265,13 +279,35 @@ void sp_gc_retune_object(size_t before) {
   sp_gc_stats_report();
   if (sp_gc_stress_pin) { sp_gc_threshold = sp_gc_threshold_init; return; }
   size_t live = sp_gc_bytes;
+  /* The budget is what may be ALLOCATED before the next collection, and what
+     pays for it is what that collection COSTS. A collection marks BOTH heaps,
+     so an object budget taken from the object live set alone is priced off
+     the wrong quantity: rubys measured a ladder where the string live set
+     grows 26x while the object set grows 4.9x, the collection rate falls with
+     the object set, and the mark per request rises 2.5x (#4384).
+     SPINEL_GC_OBJ_BUDGET=walk prices it off both.
+
+     It is OPT-IN, and the reason is that the argument for it is sound and the
+     evidence for it is not. What rubys measured at +47% was a fixed 16 MB
+     FLOOR, which is a different policy: a floor stops the budget getting
+     small, this makes it proportional to a set that can be enormous. On the
+     two shapes reproducible here -- one single-threaded, one across eight
+     workers, both with a string set 20x the object set -- proportional bought
+     no time at all and doubled RSS (53 MB -> 116 MB threaded). Whether it
+     wins on the workload it was reasoned from is a measurement only that
+     workload can make. */
+  size_t walk = live;
+  if (sp_gc_obj_budget_walk) walk += sp_str_live_total();
   /* saturating: the live counter is a heuristic and is allowed to lag, so it
      can read above the pre-collect total. Wrapping made `freed` enormous, the
      productive-sweep test went false, and the threshold was taken from a live
      count that had itself wrapped. */
   size_t freed = before > live ? before - live : 0;
-  if (freed < before / 4) { sp_gc_threshold = sp_gc_sat_mul(before, 2); }
-  else if (live > 0) { sp_gc_threshold = sp_gc_sat_mul(live, 2); if (sp_gc_threshold < sp_gc_threshold_init) sp_gc_threshold = sp_gc_threshold_init; }
+  /* The productivity test stays on the OBJECT numbers -- this sweep is what
+     frees object bytes, and whether it was worth running is a question about
+     those. Only the budget it sets can be sized from the whole walk. */
+  if (freed < before / 4) { sp_gc_threshold = sp_gc_sat_mul(before + (walk - live), 2); }
+  else if (live > 0) { sp_gc_threshold = sp_gc_sat_mul(walk, 2); if (sp_gc_threshold < sp_gc_threshold_init) sp_gc_threshold = sp_gc_threshold_init; }
   else { sp_gc_threshold = sp_gc_threshold_init; }
 }
 /* `before` and `after` are both the WHOLE live string set -- young plus old --

@@ -125,6 +125,7 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_THRESHOLD_KB` | per-worker collection budget; raise it to trade memory for fewer stop-the-world pauses (default 256) |
 | `SPINEL_GC_THRESHOLD_OBJ_KB` | the same budget for the OBJECT heap alone, overriding the pair above |
 | `SPINEL_GC_THRESHOLD_STR_KB` | the same for the STRING heap alone |
+| `SPINEL_GC_OBJ_BUDGET` | `walk` prices the object budget off objects PLUS strings -- everything a mark walks -- instead of the object heap alone (default: the object heap alone) |
 
 The two per-heap variables exist to answer a question the pair cannot. The
 mark walks both live sets, and only one heap's trigger decides when it runs.
@@ -139,6 +140,22 @@ pacing it; raising one says. Point `SPINEL_GC_STATS=1` at the result and the
 The object figure is the pool-wide budget (the base times the worker count,
 for the reason in the note below); the string figure is per worker, which is
 why the string one is not multiplied.
+
+`SPINEL_GC_OBJ_BUDGET=walk` is the third lever and the one to reach for last.
+The budget is what may be allocated before the next collection, and what pays
+for it is what that collection costs -- and a collection marks BOTH heaps. So
+an object budget taken from the object live set alone is priced off the wrong
+quantity: a program can grow its string set without the collection rate
+noticing, and the mark per unit of work climbs. `walk` prices it off both.
+
+It is off by default because the argument is better than the evidence. The
+measurement it comes from (#4384) raised the object FLOOR to a fixed 16 MB per
+worker and gained 47% on a threaded server; a floor stops the budget getting
+small, which is not the same policy as making it proportional to a live set
+that can be enormous. On two shapes reproducible in this tree -- one
+single-threaded, one across eight workers, both holding a string set twenty
+times the object set -- `walk` bought no time at all and doubled RSS. Measure
+it on your own workload before you keep it.
 
 ### A note on allocation-heavy threads
 

@@ -697,7 +697,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -865,6 +865,33 @@ gc-threshold-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	  { echo "gc-threshold-test: FAIL (STR_KB moved the object trigger too: $$bo -> $$so)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-threshold-test: pass"; else exit 1; fi
+
+# SPINEL_GC_OBJ_BUDGET=walk prices the object budget off objects PLUS strings.
+# The assertion is a WITHIN-RUN invariant -- the trigger against the live set
+# that same line reports -- not a comparison of one run's number with another's.
+# Both triggers retune continuously, so two runs' last lines are two different
+# moments, which is what made a cross-run version of this flake.
+gc-obj-budget-test: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
+	@tmp=$$(mktemp -d /tmp/spinel-gcobj.XXXXXX); ok=1; \
+	$(SPINEL) test/gc_obj_budget_walk.rb -o "$$tmp/w" >/dev/null 2>&1 || \
+	  { echo "gc-obj-budget-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/w" > "$$tmp/d.out" 2> "$$tmp/d.err"; \
+	SPINEL_GC_OBJ_BUDGET=walk SPINEL_GC_STATS=1 $(TIMEOUT60) "$$tmp/w" > "$$tmp/w.out" 2> "$$tmp/w.err"; \
+	cmp -s "$$tmp/d.out" test/gc_obj_budget_walk.rb.expected || \
+	  { echo "gc-obj-budget-test: FAIL (default output)"; ok=0; }; \
+	cmp -s "$$tmp/w.out" test/gc_obj_budget_walk.rb.expected || \
+	  { echo "gc-obj-budget-test: FAIL (walk changed the answer)"; ok=0; }; \
+	str_of() { sed -n 's/.*+ \([0-9.]*\) MB str; trigger.*/\1/p' "$$1" | tail -1; }; \
+	trg_of() { sed -n 's/.*trigger \([0-9.]*\) MB obj.*/\1/p' "$$1" | tail -1; }; \
+	ds=$$(str_of "$$tmp/d.err"); dt=$$(trg_of "$$tmp/d.err"); \
+	ws=$$(str_of "$$tmp/w.err"); wt=$$(trg_of "$$tmp/w.err"); \
+	[ -n "$$ds" ] && [ -n "$$wt" ] || { echo "gc-obj-budget-test: FAIL (no trigger line)"; ok=0; }; \
+	awk -v t="$$dt" -v s="$$ds" 'BEGIN{exit !(t < s)}' || \
+	  { echo "gc-obj-budget-test: FAIL (the default budget already saw the strings: trigger $$dt vs live str $$ds)"; ok=0; }; \
+	awk -v t="$$wt" -v s="$$ws" 'BEGIN{exit !(t > s)}' || \
+	  { echo "gc-obj-budget-test: FAIL (walk did not price in the strings: trigger $$wt vs live str $$ws)"; ok=0; }; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "gc-obj-budget-test: pass"; else exit 1; fi
 
 # A byref String parameter that a lifted proc also captures: the capture holds
 # the CALLER's slot, which for the stack shape is not a GC object, and marking

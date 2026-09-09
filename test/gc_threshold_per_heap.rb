@@ -2,6 +2,12 @@
 # triggers are both in play and SPINEL_GC_STATS reports both. The Makefile
 # runs it three times and reads the trigger line back: each per-heap floor
 # must move its own and leave the other where it was.
+# The floors are applied when the worker pool is first sized, which is the
+# first Thread.new. Anything allocated before that can collect under the
+# BUILT-IN floor and print a [gc] line the floor arms would then read as
+# "the knob did nothing". So the pool comes first.
+Thread.new { 1 }.join
+
 ts = []
 4.times do |t|
   ts << Thread.new do
