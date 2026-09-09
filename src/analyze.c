@@ -9161,6 +9161,26 @@ static void compute_byref_out_params(Compiler *c) {
     if (v)
       for (int si = 1; si < n; si++)
         if (elig[si] && sp_streq(c->scopes[si].name, v)) elig[si] = 0;
+    /* A POLY receiver reaches the method through the cls_id switch, and that
+       switch hoists its arguments once, by the argument's own type, for every
+       arm to share -- it has no callee to ask, and the arms are what it is
+       choosing between. So it passes the value where a byref arm wants the
+       slot, and the C build stops:
+         expected 'const char **' but argument is of type 'const char *'
+       The uniqueness rule used to hide this: two classes defining one name
+       was exactly the case it refused, and a poly dispatch needs two. Making
+       the group agree (df30ed28) removed that accident and left the dispatch
+       unable to call what it now agrees about.
+       Teaching the dispatch to lend the slot is the real answer and it is
+       part of deciding what a byref slot is. Until then a name a poly
+       receiver can reach keeps the value ABI, which is what it had. */
+    if (sp_streq(ty, "CallNode")) {
+      int rcv = nt_ref(nt, id, "receiver");
+      const char *cn = nt_str(nt, id, "name");
+      if (rcv >= 0 && cn && comp_ntype(c, rcv) == TY_POLY)
+        for (int si = 1; si < n; si++)
+          if (elig[si] && c->scopes[si].name && sp_streq(c->scopes[si].name, cn)) elig[si] = 0;
+    }
     /* a plain rebind of a param blocks it (see the header comment) */
     if (sp_streq(ty, "LocalVariableWriteNode") ||
         sp_streq(ty, "LocalVariableOperatorWriteNode") ||

@@ -6301,6 +6301,20 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
           /* a value-type receiver is a struct, not a heap object: it has no
              header to mark dirty, and casting it to void* does not compile */
           if (!comp_ty_value_obj(c, ty_object(ivs->class_id))) {
+            /* BEFORE the call, which by the rule #4378 established does not
+               cover the store: the callee's append allocates, a collection
+               there clears every dirty bit and empties the remembered set,
+               and the store that follows is unrecorded. It is nonetheless
+               not a live fault, and the reason is worth writing down rather
+               than rediscovering: the string heap sweeps only on a FULL
+               cycle, so a young string reachable solely through an old object
+               is never freed by a minor one. The record this misses is a
+               record nothing reads.
+               It becomes live the day strings sweep on a minor cycle, and the
+               fix is not local -- the emitter has no post-call hook, and
+               giving it one is the same work as deciding what a byref slot
+               is (a lent address, or always a heap cell). Left with the
+               design question rather than papered over here. */
             emit_indent(g_pre, g_indent);
             buf_printf(g_pre, "sp_gc_wb((void *)%s);\n", g_self);
           }
