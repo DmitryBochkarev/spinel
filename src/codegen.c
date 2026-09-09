@@ -1509,6 +1509,84 @@ static int scope_performs_match(Compiler *c, int si) {
   return 0;
 }
 
+/* One captured local's heap cell: the allocation, the root and the initial
+   value. Split out of emit_scope_decls because a fiber body needs the same
+   emission for a cell it owns rather than inherits -- a local DECLARED inside
+   a Thread.new block is one cell per thread, and taking it from the capture
+   made eight threads share one counter (#4410). */
+static void emit_cell_decl(Compiler *c, Scope *s, LocalVar *lv, Buf *b) {
+      /* A cell over an INLINED block's param: the loop emitters bind the plain
+         C slot, so declare it too and let the body's opening line copy it into
+         the cell (emit_loop_body). */
+      if (lv->cell_shadow && !lv->is_param) declare_local(c, b, lv, 0);
+      if (lv->type == TY_PROC) {
+        /* the cell is an int slot holding a collectable Proc: it needs a scan,
+           or the capture keeps the cell and nothing keeps the proc (#4077) */
+        buf_printf(b, "    sp_int *_cell_%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, sp_cell_scan_procint);\n", lv->name);
+        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
+        if (lv->is_param) buf_printf(b, "    *_cell_%s = (sp_int)(uintptr_t)lv_%s;\n", lv->name, lv->name);
+        else buf_printf(b, "    *_cell_%s = 0;\n", lv->name);
+        return;
+      }
+      /* A float capture gets a native sp_float cell rather than laundering the
+         bits through the int slot: *_cell_x is then a real sp_float lvalue, so
+         the ordinary read / write / compound-assign paths work unchanged. The
+         cell holds no GC pointer, so no cell scan is needed. */
+      if (lv->type == TY_FLOAT) {
+        buf_printf(b, "    sp_float *_cell_%s = (sp_float *)sp_gc_alloc(sizeof(sp_float), NULL, NULL);\n", lv->name);
+        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
+        if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
+        else buf_printf(b, "    *_cell_%s = 0.0;\n", lv->name);
+        return;
+      }
+      /* A class value is a small struct of a cls_id and a rodata name -- no
+         GC pointer in it, so its cell needs no scan, as the float cell does
+         not. Without a cell of its own a captured class variable hit the
+         "non-integer capture" reject: `k = Struct.new(:x); a.each { k.new }`
+         over a boxed receiver, where the block is a real closure (#3995). */
+      { const char *vs = cell_value_struct(lv->type);
+        if (vs) {
+          buf_printf(b, "    %s *_cell_%s = (%s *)sp_gc_alloc(sizeof(%s), NULL, NULL);\n", vs, lv->name, vs, vs);
+          buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
+          if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
+          else buf_printf(b, "    *_cell_%s = %s;\n", lv->name, cell_value_struct_empty(lv->type));
+          return;
+        } }
+      if (lv->type == TY_POLY) {
+        buf_printf(b, "    sp_RbVal *_cell_%s = (sp_RbVal *)sp_gc_alloc(sizeof(sp_RbVal), NULL, sp_cell_scan_rbval);\n", lv->name);
+        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
+        if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
+        else buf_printf(b, "    *_cell_%s = sp_box_nil();\n", lv->name);
+        return;
+      }
+      /* A pointer (string / array / hash / heap object) capture rides a real
+         typed-pointer cell (`T *_cell_x`): deref is an ordinary lvalue, so both
+         reads and reassignments work with no (sp_int)(uintptr_t) cast, and the
+         existing cell scan marks the referent. Int / bool stay direct in an
+         sp_int cell; float / poly have native cells above. */
+      int ptr_cell = cell_is_typed_ptr(c, lv);
+      /* a Symbol is int-represented (sp_sym), so it rides the sp_int cell */
+      if (lv->type != TY_INT && lv->type != TY_BOOL && lv->type != TY_SYMBOL &&
+          lv->type != TY_UNKNOWN && !ptr_cell)
+        unsupported(c, s->def_node, "closure capturing a non-integer variable (later slice)");
+      if (ptr_cell) {
+        const char *cell_scan = cell_scan_fn(lv->type);
+        buf_puts(b, "    "); emit_ctype(c, lv->type, b);
+        buf_printf(b, " *_cell_%s = (", lv->name); emit_ctype(c, lv->type, b);
+        buf_puts(b, " *)sp_gc_alloc(sizeof("); emit_ctype(c, lv->type, b);
+        buf_printf(b, "), NULL, %s);\n", cell_scan);
+        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
+        if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
+        else buf_printf(b, "    *_cell_%s = NULL;\n", lv->name);
+        return;
+      }
+      buf_printf(b, "    sp_int *_cell_%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, NULL);\n", lv->name);
+      buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
+      if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
+      else buf_printf(b, "    *_cell_%s = 0;\n", lv->name);
+      return;
+}
+
 void emit_scope_decls(Compiler *c, Scope *s, Buf *b) {
   int si = (int)(s - c->scopes);
   int has_begin = scope_has_begin(c, si);
@@ -1545,78 +1623,7 @@ void emit_scope_decls(Compiler *c, Scope *s, Buf *b) {
     /* Captured-by-closure local: lives in a heap cell so the proc and this
        scope share storage. A param's incoming value is copied into the cell;
        a body local starts at 0. Int and proc cells supported. */
-    if (lv->is_cell) {
-      /* A cell over an INLINED block's param: the loop emitters bind the plain
-         C slot, so declare it too and let the body's opening line copy it into
-         the cell (emit_loop_body). */
-      if (lv->cell_shadow && !lv->is_param) declare_local(c, b, lv, 0);
-      if (lv->type == TY_PROC) {
-        /* the cell is an int slot holding a collectable Proc: it needs a scan,
-           or the capture keeps the cell and nothing keeps the proc (#4077) */
-        buf_printf(b, "    sp_int *_cell_%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, sp_cell_scan_procint);\n", lv->name);
-        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
-        if (lv->is_param) buf_printf(b, "    *_cell_%s = (sp_int)(uintptr_t)lv_%s;\n", lv->name, lv->name);
-        else buf_printf(b, "    *_cell_%s = 0;\n", lv->name);
-        continue;
-      }
-      /* A float capture gets a native sp_float cell rather than laundering the
-         bits through the int slot: *_cell_x is then a real sp_float lvalue, so
-         the ordinary read / write / compound-assign paths work unchanged. The
-         cell holds no GC pointer, so no cell scan is needed. */
-      if (lv->type == TY_FLOAT) {
-        buf_printf(b, "    sp_float *_cell_%s = (sp_float *)sp_gc_alloc(sizeof(sp_float), NULL, NULL);\n", lv->name);
-        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
-        if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
-        else buf_printf(b, "    *_cell_%s = 0.0;\n", lv->name);
-        continue;
-      }
-      /* A class value is a small struct of a cls_id and a rodata name -- no
-         GC pointer in it, so its cell needs no scan, as the float cell does
-         not. Without a cell of its own a captured class variable hit the
-         "non-integer capture" reject: `k = Struct.new(:x); a.each { k.new }`
-         over a boxed receiver, where the block is a real closure (#3995). */
-      { const char *vs = cell_value_struct(lv->type);
-        if (vs) {
-          buf_printf(b, "    %s *_cell_%s = (%s *)sp_gc_alloc(sizeof(%s), NULL, NULL);\n", vs, lv->name, vs, vs);
-          buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
-          if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
-          else buf_printf(b, "    *_cell_%s = %s;\n", lv->name, cell_value_struct_empty(lv->type));
-          continue;
-        } }
-      if (lv->type == TY_POLY) {
-        buf_printf(b, "    sp_RbVal *_cell_%s = (sp_RbVal *)sp_gc_alloc(sizeof(sp_RbVal), NULL, sp_cell_scan_rbval);\n", lv->name);
-        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
-        if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
-        else buf_printf(b, "    *_cell_%s = sp_box_nil();\n", lv->name);
-        continue;
-      }
-      /* A pointer (string / array / hash / heap object) capture rides a real
-         typed-pointer cell (`T *_cell_x`): deref is an ordinary lvalue, so both
-         reads and reassignments work with no (sp_int)(uintptr_t) cast, and the
-         existing cell scan marks the referent. Int / bool stay direct in an
-         sp_int cell; float / poly have native cells above. */
-      int ptr_cell = cell_is_typed_ptr(c, lv);
-      /* a Symbol is int-represented (sp_sym), so it rides the sp_int cell */
-      if (lv->type != TY_INT && lv->type != TY_BOOL && lv->type != TY_SYMBOL &&
-          lv->type != TY_UNKNOWN && !ptr_cell)
-        unsupported(c, s->def_node, "closure capturing a non-integer variable (later slice)");
-      if (ptr_cell) {
-        const char *cell_scan = cell_scan_fn(lv->type);
-        buf_puts(b, "    "); emit_ctype(c, lv->type, b);
-        buf_printf(b, " *_cell_%s = (", lv->name); emit_ctype(c, lv->type, b);
-        buf_puts(b, " *)sp_gc_alloc(sizeof("); emit_ctype(c, lv->type, b);
-        buf_printf(b, "), NULL, %s);\n", cell_scan);
-        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
-        if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
-        else buf_printf(b, "    *_cell_%s = NULL;\n", lv->name);
-        continue;
-      }
-      buf_printf(b, "    sp_int *_cell_%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, NULL);\n", lv->name);
-      buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
-      if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
-      else buf_printf(b, "    *_cell_%s = 0;\n", lv->name);
-      continue;
-    }
+    if (lv->is_cell) { emit_cell_decl(c, s, lv, b); continue; }
     if (lv->is_param) {
       /* A poly param is an sp_RbVal by value: root through the tagged
          RBVAL form so the collector reads the boxed pointer, not the
@@ -3338,6 +3345,32 @@ static void collect_locals_deep(Compiler *c, int id, NameSet *out) {
    function). The caller classifies each as the proc's own param/local, a
    nested block's local, or a captured enclosing var (is_cell). Mirrors the
    analyze-side a_collect_used so codegen captures match the is_cell marking. */
+/* Does `name` appear anywhere in this subtree once the subtree at `skip` is
+   cut out? Block locals are flattened into the enclosing scope's table, so
+   "declared in the block" and "belongs to the enclosing scope" look identical
+   from LocalVar alone; this is what tells them apart. A name the enclosing
+   scope never touches outside the block is the block's own. */
+static int name_used_outside(Compiler *c, int id, int skip, const char *name) {
+  if (id < 0 || id == skip || !name) return 0;
+  const char *ty = nt_type(c->nt, id);
+  if (!ty) return 0;
+  if (sp_streq(ty, "LocalVariableReadNode") || sp_streq(ty, "LocalVariableWriteNode") ||
+      sp_streq(ty, "LocalVariableTargetNode") || sp_streq(ty, "LocalVariableOperatorWriteNode") ||
+      sp_streq(ty, "LocalVariableOrWriteNode") || sp_streq(ty, "LocalVariableAndWriteNode")) {
+    const char *n = nt_str(c->nt, id, "name");
+    if (n && sp_streq(n, name)) return 1;
+  }
+  int nr = nt_num_refs(c->nt, id);
+  for (int i = 0; i < nr; i++)
+    if (name_used_outside(c, nt_ref_at(c->nt, id, i), skip, name)) return 1;
+  int na = nt_num_arrs(c->nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(c->nt, id, i, &n);
+    for (int k = 0; k < n; k++) if (name_used_outside(c, ids[k], skip, name)) return 1;
+  }
+  return 0;
+}
+
 void proc_collect_used(Compiler *c, int id, NameSet *out) {
   if (id < 0) return;
   const char *ty = nt_type(c->nt, id);
@@ -3856,8 +3889,19 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
       if (!lv || lv->type == TY_UNKNOWN) continue;
       /* A name defined in the body (including a nested block's param/local) is
          a body-local, not a capture -- unless it's a celled enclosing local
-         (then the write must reach the outer scope through the cell). */
-      if (nameset_has(&fib_decls, nm) && !lv->is_cell) continue;
+         (then the write must reach the outer scope through the cell).
+
+         "Celled" alone is not enough to say the local is the enclosing
+         scope's, because block locals are flattened into that scope's table:
+         `Thread.new { steps = 0; ... }` puts `steps` there too. Captured, every
+         thread got the SAME cell -- eight threads counting to 3000 reported
+         about 24,000 between them, silently (#4410). The enclosing scope
+         TOUCHING it outside the block is what makes it shared; if it does not,
+         the cell is the body's own and is allocated in its prologue. */
+      if (nameset_has(&fib_decls, nm)) {
+        if (!lv->is_cell) continue;
+        if (!encl->body || encl->body < 0 || !name_used_outside(c, encl->body, blk, nm)) continue;
+      }
       nameset_add(&caps, nm);
     }
   }
@@ -4044,7 +4088,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   if (encl) {
     for (int i = 0; i < encl->nlocals; i++) {
       LocalVar *lv = &encl->locals[i];
-      if (lv->is_param || lv->is_cell) continue;
+      if (lv->is_param) continue;
       if (!lv->name) continue;
       { int is_bp = 0;
         for (int bi = 0; bi < nbp; bi++) if (sp_streq(lv->name, bp_names[bi])) { is_bp = 1; break; }
@@ -4052,6 +4096,10 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
       if (nameset_has(&caps, lv->name)) continue;
       if (!nameset_has(&fib_locals, lv->name) && !nameset_has(&fib_decls, lv->name)) continue;
       if (lv->type == TY_UNKNOWN) continue;
+      /* A celled local that is NOT in caps is the body's own (see the capture
+         rule above): allocate its cell here, once per fiber, rather than
+         unpacking a shared one from the capture struct. */
+      if (lv->is_cell) { emit_cell_decl(c, encl, lv, pb); continue; }
       declare_local(c, pb, lv, 0);
     }
   }
