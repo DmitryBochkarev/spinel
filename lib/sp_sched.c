@@ -1203,6 +1203,13 @@ static void sp_safepoint_preempt(void) {
    empty queue -- otherwise main would falsely declare a deadlock while a helper
    runs the very thread that will wake it. At N=1 g_nrunning is 0 between runs, so
    this returns on an empty queue exactly as before. PRE/POST: sched lock held. */
+/* may_wait: 0 never waits, 1 waits for anything outstanding, 2 is the EXIT
+   DRAIN -- it waits for work that can still run and NOT for threads that are
+   merely blocked. main() finishing is the end of the program in CRuby, where
+   the other threads are killed where they stand; waiting on a sleeper there
+   meant `Thread.new { sleep 30 }` at the top of a script hung the process
+   after its last statement, and `exit 0` was the difference between a program
+   that ended and one that did not (#4394, #4397, rofl0r). */
 static void sp_sched_pump(sp_thread *target, int may_wait) {
   for (;;) {
 #ifdef SP_THREADS
@@ -1243,7 +1250,12 @@ static void sp_sched_pump(sp_thread *target, int may_wait) {
        broadcasts (sp_sched_signal_if_quiescent). Only when nothing runs and the
        queue is empty do we fall through -- drained, or a deadlock the caller
        observes. */
-    if (may_wait && (g_nrunning > 0 || g_runnable > 0 || g_sleepers || g_io_waiters)) {
+    int outstanding = (g_nrunning > 0 || g_runnable > 0);
+    /* A sleeper or an I/O waiter is work that may yet become runnable, so an
+       ordinary wait counts it. The exit drain does not: nothing is going to
+       ask for it after main has returned. */
+    if (may_wait == 1) outstanding = outstanding || g_sleepers || g_io_waiters;
+    if (may_wait && outstanding) {
 #ifdef SP_EV_BACKEND
       /* Main is worker 0, and threads pin to it -- at SPINEL_WORKERS=1 all of
          them do. So main waits on worker 0's readiness set like any other
@@ -2013,7 +2025,7 @@ void sp_sched_drain(void) {
      exactly as before). */
   if (g_current != &g_main_thread) return;
   SCHED_LOCK();
-  sp_sched_pump(NULL, 1);
+  sp_sched_pump(NULL, 2);   /* exit drain: runnable work only, not sleepers */
 #ifdef SP_THREADS
   g_shutdown = 1;
   sched_wake_all_workers();
