@@ -12,14 +12,16 @@
 #   LOCALITY_BUILD=N   N green threads allocate 1/N of it each
 #
 # The answer, measured with ns/object = mark seconds / objects marked (Apple
-# M-series, 6 performance cores, both budgets pinned, two passes per cell):
+# M-series, 6 performance cores, both budgets pinned, two passes per cell).
+# `parts` is the participant count the [gc] line reports -- see the third
+# control below, which is why the column is here at all:
 #
-#   W     BUILD=1   BUILD=8
-#   1      4.20      4.30      <- the control: 8 green threads on ONE worker
-#   2      4.31      5.34
-#   4      3.82      5.53
-#   8      4.04      5.71
-#   12     3.57      5.46
+#   W    parts   BUILD=1   BUILD=8
+#   1      2      4.37      4.12     <- the control: 8 green threads, ONE worker
+#   2      3      4.09      5.53
+#   4      5      4.12      5.56
+#   8      9      4.08      5.85
+#   12    13      4.15      5.89
 #
 # BUILD=1 is flat across the ladder; the rise is only in the arm where more
 # than one worker allocated. The W=1 row is what makes that a statement about
@@ -28,15 +30,15 @@
 # because one worker's free list served all of them.
 #
 # Holding the pool at W=8 and varying only the builders shows it is a STEP and
-# not a gradient -- 3.74, 5.56, 5.62, 5.78, 5.74 ns/object at 1, 2, 4, 8 and 16
-# builders. The first extra allocator costs 49%; the next fourteen cost
+# not a gradient -- 4.08, 5.65, 5.72, 5.68, 5.87 ns/object at 1, 2, 4, 8 and 16
+# builders. The first extra allocator costs 39%; the next fourteen cost
 # nothing. One free list against more than one.
 #
-# TO RUN THE LADDER, with the two controls that make it mean anything -- both
-# of which silently invalidate it, and neither of which warns:
+# TO RUN THE LADDER, with the three controls that make it mean anything. All
+# three silently invalidate it and none of them warns:
 #
 #   for W in 1 2 4 8 12; do
-#     LOCALITY_BUILD=$B LOCALITY_NODES=400000 LOCALITY_ROUNDS=20000 \
+#     LOCALITY_BUILD=$B LOCALITY_CHURN=16 LOCALITY_NODES=400000 LOCALITY_ROUNDS=12000 \
 #     SPINEL_WORKERS=$W SPINEL_GC_OBJ_BUDGET=fixed SPINEL_GC_STR_BUDGET=fixed \
 #     SPINEL_GC_THRESHOLD_OBJ_KB=$((65536/W)) SPINEL_GC_THRESHOLD_STR_KB=$((65536/W)) \
 #     SPINEL_GC_PHASES=1 ./gc_locality_build
@@ -54,14 +56,23 @@
 #      Both arms therefore build from inside threads, and the warm-up thread
 #      below runs first so the pool and the multiply already exist when either
 #      one starts.
+#   3. LOCALITY_CHURN CAPS THE POOL, SO SPINEL_WORKERS ALONE DOES NOT SET IT.
+#      The scheduler grows the pool toward one worker per LIVE GREEN THREAD,
+#      so the churn thread count -- not the cap -- is what decides how many
+#      workers a cell actually runs. At LOCALITY_CHURN=4 the participant count
+#      reads 6 at both SPINEL_WORKERS=8 and 12, which is to say those two
+#      cells are the same run under two labels. Give LOCALITY_CHURN at least the
+#      largest W on the ladder and read `str/worker x N` back to check; the
+#      table above carries that column for exactly this reason.
 #
 # The defaults here are sized for the gate, not for the ladder: small enough
-# to run with the suite, large enough to collect. The checksum is the same in
+# to run with the suite, large enough to collect, and with eight churn threads
+# so that the leg's SPINEL_WORKERS=8 arm really is eight workers (see 3). The checksum is the same in
 # every arm and at every worker count -- a graph built by N workers is the
 # graph built by one -- which is what gc-locality-test asserts.
 
 BUILD_THREADS = (ENV["LOCALITY_BUILD"] || "1").to_i
-CHURN_THREADS = (ENV["LOCALITY_CHURN"] || "4").to_i
+CHURN_THREADS = (ENV["LOCALITY_CHURN"] || "8").to_i
 NODES = (ENV["LOCALITY_NODES"] || "60000").to_i
 CHURN_ROUNDS = (ENV["LOCALITY_ROUNDS"] || "3000").to_i
 

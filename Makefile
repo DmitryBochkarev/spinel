@@ -944,6 +944,16 @@ byref-capture-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 # The collection floor is here for the same reason as in threaded-render-test:
 # an arm that stops collecting still prints the right checksum and defends
 # nothing.
+#
+# LOCALITY_CHURN is NOT varied per arm, and that is deliberate twice over. It
+# is what decides how many workers a cell really runs -- the pool grows toward
+# one worker per live green thread, so SPINEL_WORKERS is a cap and the churn
+# count is the demand -- and the program's default of 8 is what makes the W=8
+# arm below an eight-worker run rather than a six-worker one. Holding it equal
+# across the arms is also what lets every arm be compared against ONE expected
+# file: it is part of the answer, so varying it per cell would mean either a
+# file per cell or dropping it from the comparison, and it is the wrong thing
+# to drop.
 GC_LOCALITY_SRC := test/gc_locality_build.rb
 
 gc-locality-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
