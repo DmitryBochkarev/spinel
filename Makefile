@@ -44,7 +44,7 @@ RBS_LIB      = build/librbs.a
 
 .PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
-        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test \
+        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test threaded-render-test \
         gate-optcarrot clean install uninstall deps tools
 
 # `make all` includes the RBS extractor when vendor/rbs has been fetched
@@ -697,7 +697,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test threaded-render-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -925,6 +925,63 @@ byref-capture-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	  { echo "byref-capture-test: FAIL (output differs)"; diff -u test/rbs-seed/byref_capture_scan.expected "$$tmp/out" | head -5; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "byref-capture-test: pass"; else exit 1; fi
+
+# ---- The threaded render benchmark, as a correctness gate (#4384) ----
+# benchmark/bm_threaded_render.rb is the only workload in the tree that runs
+# the collector under real concurrency: 32 green threads, each holding a
+# request's whole render live across a Thread.pass. Everything the threaded
+# collector does that the single-threaded one does not -- the parallel slot
+# sweep, the per-worker string budget, the root walk over another worker's
+# fibers -- is on that path, and three of the last defects found there were
+# silent wrong answers rather than crashes.
+#
+# So the benchmark is run here for its ANSWER, not its time. The digests are
+# position-sensitive and fixed by each thread's index, so they do not depend
+# on the interleaving: a collection that frees a live fragment, or hands one
+# thread another's buffer, changes stdout.
+#
+# The matrix is worker count crossed with the budget policies, because those
+# are what move WHEN a collection lands relative to a half-built page, which
+# is the state the bugs were in. SPINEL_WORKERS=1 is included deliberately:
+# it is the cooperative model, and a green thread parked at a yield with the
+# collector running on the same worker is a different root set from a green
+# thread parked while another worker collects.
+#
+# Two shape assertions keep the leg discriminating rather than merely green.
+# A benchmark that stops collecting, or whose live graph shrinks to nothing,
+# still produces the right digests -- and would defend nothing.
+THREADED_RENDER_SRC := benchmark/bm_threaded_render.rb
+
+threaded-render-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+	@tmp=$$(mktemp -d /tmp/spinel-thrender.XXXXXX); ok=1; \
+	$(SPINEL) $(THREADED_RENDER_SRC) -o "$$tmp/r" >/dev/null 2>&1 || \
+	  { echo "threaded-render-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	for w in 1 2 8; do \
+	  for mode in default obj walk; do \
+	    if [ "$$mode" = default ]; then unset SPINEL_GC_OBJ_BUDGET; \
+	    else SPINEL_GC_OBJ_BUDGET=$$mode; export SPINEL_GC_OBJ_BUDGET; fi; \
+	    SPINEL_WORKERS=$$w $(TIMEOUT60) "$$tmp/r" > "$$tmp/out.$$w.$$mode" 2>/dev/null || \
+	      { echo "threaded-render-test: FAIL (W=$$w $$mode: exited non-zero)"; ok=0; continue; }; \
+	    cmp -s "$$tmp/out.$$w.$$mode" $(THREADED_RENDER_SRC).expected || \
+	      { echo "threaded-render-test: FAIL (W=$$w $$mode changed the answer)"; \
+	        diff -u $(THREADED_RENDER_SRC).expected "$$tmp/out.$$w.$$mode" | head -6; ok=0; }; \
+	  done; \
+	  unset SPINEL_GC_OBJ_BUDGET; \
+	done; \
+	SPINEL_WORKERS=8 SPINEL_GC_MINOR=1 $(TIMEOUT60) "$$tmp/r" > "$$tmp/out.minor" 2>/dev/null; \
+	cmp -s "$$tmp/out.minor" $(THREADED_RENDER_SRC).expected || \
+	  { echo "threaded-render-test: FAIL (SPINEL_GC_MINOR=1 changed the answer)"; ok=0; }; \
+	SPINEL_WORKERS=8 SPINEL_GC_PHASES=1 $(TIMEOUT60) "$$tmp/r" >/dev/null 2> "$$tmp/ph.err"; \
+	colls=$$(sed -n 's/^\[gc\] \([0-9]*\) collections.*/\1/p' "$$tmp/ph.err" | tail -1); \
+	marked=$$(sed -n 's/^\[gcph\] marked \([0-9]*\) objs.*/\1/p' "$$tmp/ph.err" | tail -1); \
+	[ -n "$$colls" ] && [ -n "$$marked" ] || \
+	  { echo "threaded-render-test: FAIL (no [gc]/[gcph] line under SPINEL_GC_PHASES)"; ok=0; colls=0; marked=0; }; \
+	[ "$$colls" -ge 8 ] || \
+	  { echo "threaded-render-test: FAIL (only $$colls collections: the workload stopped exercising the collector)"; ok=0; }; \
+	awk -v m="$$marked" -v c="$$colls" 'BEGIN{exit !(c > 0 && m / c > 1000)}' || \
+	  { echo "threaded-render-test: FAIL (mark walks $$marked objs over $$colls collections: the live graph is gone)"; ok=0; }; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "threaded-render-test: pass"; else exit 1; fi
 
 GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_retval.rb \
@@ -1438,15 +1495,21 @@ test/%.rb.err.expected: test/%.rb
 # collide) AND stable across runs, so the generated C's embedded __FILE__ stays
 # constant and the cc (ccache) cache keeps hitting -- a per-run mktemp path would
 # defeat it. Verdicts are aggregated in benchmark order (deterministic).
-bench: $(SPINEL) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
+bench: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@rm -rf build/bench-results; mkdir -p build/bench-results
 	@ls benchmark/*.rb | xargs -P $(BENCH_PJOBS) -n 1 sh -c '\
 	  f="$$1"; bn=$$(basename "$$f" .rb); d=build/bench-results; res="$$d/$$bn.res"; \
 	  c="$$d/$$bn.c"; o="$$d/$$bn.o"; bin="$$d/$$bn.bin"; exp="$$d/$$bn.exp"; act="$$d/$$bn.act"; \
-	  if $(TIMEOUT10) $(SPINEL) "$$f" -c --no-line-map -o "$$c" 2>/dev/null \
-	     && $(CC) $(CFLAGS) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) -Ilib -c "$$c" -o "$$o" 2>/dev/null \
-	     && $(CC) $(CFLAGS) "$$o" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; then \
+	  mtdef=""; rtlib="$(SP_RT_LIB)"; natobjs="$(BUNDLED_NATIVE_OBJS)"; mtld=""; \
+	  if $(TIMEOUT10) $(SPINEL) "$$f" -c --no-line-map -o "$$c" 2>/dev/null; then \
+	    if grep -q SPINEL_USES_THREADS "$$c"; then \
+	      mtdef="$(MT_DEF)"; rtlib="$(SP_RT_MT_LIB)"; natobjs="$(BUNDLED_NATIVE_MT_OBJS)"; mtld="-lpthread"; \
+	    fi; \
+	  fi; \
+	  if [ -f "$$c" ] \
+	     && $(CC) $(CFLAGS) $$mtdef -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS) -Ilib -c "$$c" -o "$$o" 2>/dev/null \
+	     && $(CC) $(CFLAGS) "$$o" $$natobjs $$rtlib $(LDFLAGS) -lm $$mtld $(GC_FLAGS) -o "$$bin" 2>/dev/null; then \
 	    if [ -f "$$f.expected" ]; then cp "$$f.expected" "$$exp"; rc=0; \
 	    else $(TIMEOUT60) $(REF_RUBY) "$$f" >"$$exp" 2>/dev/null; rc=$$?; \
 	      if [ $$rc -ne 0 ] && [ "$(REF_RUBY)" != "ruby" ]; then $(TIMEOUT60) ruby "$$f" >"$$exp" 2>/dev/null; rc=$$?; fi; \
