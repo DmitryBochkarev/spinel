@@ -1,0 +1,7 @@
+join nil
+status "sleep"
+read ["line0", "line1", "line2"]
+late "late reader"
+plain "ordinary"
+missing Errno::ENOENT
+end
