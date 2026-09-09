@@ -2112,7 +2112,10 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
   int tc = -1, tx = -1, tt = -1;
   if (acct == TY_FLOAT) { tc = ++g_tmp; tx = ++g_tmp; tt = ++g_tmp; }
   buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
-  buf_printf(b, "; sp_int _t%d = sp_%sArray_length(_t%d); ", tn, k, ta);
+  /* rooted the way the poly-accumulator arm above roots its receiver: the
+     element is taken out of this temp on every turn and the block allocates
+     in between */
+  buf_printf(b, "; SP_GC_ROOT(_t%d); sp_int _t%d = sp_%sArray_length(_t%d); ", ta, tn, k, ta);
   emit_ctype(c, acct, b); buf_printf(b, " _t%d = ", tacc);
   if (argc == 1) {
     TyKind init_t = comp_ntype(c, argv[0]);
@@ -2257,6 +2260,9 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
     Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, pr, &rb);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_IntArray *_t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+    /* rooted like the two arrays built below it: the length is the loop
+       bound, re-read every turn, and the block runs between two reads */
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ta);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_PtrArray *_t%d = sp_PtrArray_new(); SP_GC_ROOT(_t%d);\n", tout, tout);
     emit_indent(g_pre, g_indent);
@@ -2306,6 +2312,8 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, pr, &rb);
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "sp_IntArray *_t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
+  /* rooted for the walk, as the slice_when arm above roots its receiver */
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ta);
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "sp_IntArray *_t%d = sp_IntArray_new(); SP_GC_ROOT(_t%d);\n", tkeys, tkeys);
   emit_indent(g_pre, g_indent);
@@ -3719,9 +3727,20 @@ int emit_each_with_index_chain(Compiler *c, int id, Buf *b) {
   int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp, tidx = ++g_tmp;
   buf_puts(b, "({ ");
   emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", ta); emit_expr(c, arr, b); buf_puts(b, "; ");
+  /* rooted the way emit_reduce_block_expr roots its own hoist: the loop below
+     re-reads this temp's length as its bound and takes the element out of it
+     every turn, with the block running in between */
+  emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, " ");
   emit_ctype(c, acc_ty, b); buf_printf(b, " _t%d = ", tacc);
   if (init >= 0) emit_expr(c, init, b); else buf_puts(b, "0");
   buf_puts(b, "; ");
+  /* and the accumulator, for the reason emit_reduce_block_expr gives: it is
+     rebound to the block's fresh answer every turn, and the next block body
+     allocates before it reads it. With only the receiver rooted, a String seed
+     came back 3 characters of 112 under GC stress. Same guard as there. */
+  if (needs_root(acc_ty) && !comp_ty_value_obj(c, acc_ty)) {
+    emit_gc_root_tmp(c, acc_ty, tacc, b); buf_puts(b, " ");
+  }
   buf_printf(b, "sp_int _t%d = ", tidx);
   if (off >= 0) emit_expr(c, off, b); else buf_puts(b, "0");
   buf_puts(b, "; ");
@@ -4182,6 +4201,10 @@ int emit_sort_cmp_expr(Compiler *c, int id, Buf *b) {
 else {
     emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = _t%d;\n", tr, trv);  /* sort! operates on self */
+    /* rooted like the copy the non-bang arm sorts: the comparator below is
+       user code, and the array it sorts in place has no other holder when
+       the receiver was a temporary */
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tr);
   }
   /* Bottom-up merge sort: stable, and O(n log n) comparisons. (A bubble sort
      with the comparator inlined was quadratic -- a 40K-element sort took five
@@ -4353,6 +4376,11 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
   int trv = ++g_tmp, tn = ++g_tmp, tmin = ++g_tmp, tmax = ++g_tmp, ti = ++g_tmp, te = ++g_tmp, tres = ++g_tmp;
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", trv); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+  /* the length is hoisted once, but every turn takes its element out of this
+     temp after the comparator has run, and the comparator is user code that
+     allocates: rooted. A range or hash receiver arrives here already rooted
+     by the arm above that materialized it, and takes a second slot. */
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trv);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = sp_%sArray_length(_t%d);\n", tn, k, trv);
   emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre);
   /* An empty comparator reduction returns nil, so use the carrier's nil
@@ -4673,6 +4701,9 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
             Buf rb_es; memset(&rb_es, 0, sizeof rb_es); emit_expr(c, es_recv, &rb_es);
             emit_indent(g_pre, g_indent); emit_ctype(c, arr_rt, g_pre);
             buf_printf(g_pre, " _t%d = %s;\n", ta_es, rb_es.p ? rb_es.p : ""); free(rb_es.p);
+            /* rooted like the result array below: the length is the loop
+               bound and the block runs between two reads of it */
+            emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ta_es);
             emit_indent(g_pre, g_indent);
             buf_printf(g_pre, "sp_int _t%d = ", ts_es); emit_int_expr(c, es_argv[0], g_pre); buf_puts(g_pre, ";\n");
             emit_indent(g_pre, g_indent);
@@ -4749,6 +4780,9 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
             Buf rb_ec; memset(&rb_ec, 0, sizeof rb_ec); emit_expr(c, ec_recv, &rb_ec);
             emit_indent(g_pre, g_indent); emit_ctype(c, arr_ec, g_pre);
             buf_printf(g_pre, " _t%d = %s;\n", ta_ec, rb_ec.p ? rb_ec.p : ""); free(rb_ec.p);
+            /* rooted like the result array below, for the same reason as the
+               each_slice chain above */
+            emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ta_ec);
             emit_indent(g_pre, g_indent);
             buf_printf(g_pre, "sp_int _t%d = ", tn_ec); emit_int_expr(c, ec_argv[0], g_pre); buf_puts(g_pre, ";\n");
             emit_indent(g_pre, g_indent);
@@ -4849,6 +4883,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
               Buf rb_wi; memset(&rb_wi, 0, sizeof rb_wi); emit_expr(c, ec_recv2, &rb_wi);
               emit_indent(g_pre, g_indent); emit_ctype(c, arr_wi, g_pre);
               buf_printf(g_pre, " _t%d = %s;\n", ta_wi, rb_wi.p ? rb_wi.p : ""); free(rb_wi.p);
+              /* rooted like the result array below, as the each_cons chain is */
+              emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ta_wi);
               emit_indent(g_pre, g_indent);
               buf_printf(g_pre, "sp_int _t%d = ", tn_wi); emit_int_expr(c, ec_argv2[0], g_pre); buf_puts(g_pre, ";\n");
               emit_indent(g_pre, g_indent);
