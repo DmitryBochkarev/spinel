@@ -143,6 +143,7 @@ void sp_alloc_stress_init(void) {
 
    Not scaled under GC stress: that mode exists to maximize collections, and
    multiplying its 2 KB budget would quietly weaken every stress run. */
+#endif  /* SP_THREADS -- the floors below are read by EVERY program */
 /* Set one heap's floor from an environment variable, leaving the other alone.
    SPINEL_GC_THRESHOLD_KB moves both together, and moving them together cannot
    answer WHICH heap's trigger paces the collections. On a server whose string
@@ -160,7 +161,17 @@ static void sp_alloc_floor_from_env(const char *name, size_t *cur, size_t *init)
   SP_GC_CTR_SET(*cur, base);
   *init = base;
 }
-void sp_alloc_worker_tune(int workers) {
+/* The three floors, read from the environment. Called twice on purpose and
+   idempotent: once before main for EVERY program, and again from
+   sp_alloc_worker_tune, which only a threaded one reaches and which scales
+   what it finds by the worker count.
+
+   It used to live only in the second, and so did nothing at all in a
+   single-threaded program -- `SPINEL_GC_THRESHOLD_KB=65536 ./prog` collected
+   at 256 KB and said `trigger 0.25 MB` while the operator read the manual.
+   The budget MODE was moved out of here for the same reason and with the same
+   sentence (see sp_gc.c): the pacing is not a threads-only question. */
+void sp_alloc_floors_from_env(void) {
   const char *e = getenv("SPINEL_GC_THRESHOLD_KB");
   if (e && *e) {
     long v = atol(e);
@@ -172,6 +183,10 @@ void sp_alloc_worker_tune(int workers) {
   }
   sp_alloc_floor_from_env("SPINEL_GC_THRESHOLD_OBJ_KB", &sp_gc_threshold, &sp_gc_threshold_init);
   sp_alloc_floor_from_env("SPINEL_GC_THRESHOLD_STR_KB", &sp_str_threshold, &sp_str_threshold_init);
+}
+#ifdef SP_THREADS
+void sp_alloc_worker_tune(int workers) {
+  sp_alloc_floors_from_env();
   {
     const char *st = getenv("SPINEL_GC_STRESS");
     if (st && *st && *st != '0') return;
@@ -267,6 +282,15 @@ static void sp_gc_stats_emit(void) {
      Under SP_THREADS the per-worker string sweep runs inside the slot sweep
      (sp_sweep_one_slot), so `string sweep` is the serial path's figure and
      reads zero on the threaded one. */
+  /* Which generation the string live set is in. The [gc] line's `str` is the
+     two added together, and they answer different questions: young is what the
+     next sweep can reclaim, old is what only a MAJOR can, and a budget that
+     promotes early can grow the second while the first looks healthy. */
+  fprintf(stderr,
+          "[gcph] string live %.1f MB young + %.1f MB old  (major at %.1f MB old)\n",
+          (double)(sp_str_live_total() - sp_str_old_total()) / 1048576.0,
+          (double)sp_str_old_total() / 1048576.0,
+          (double)sp_str_old_threshold / 1048576.0);
   fprintf(stderr,
           "[gcph] marked %llu objs  swept %llu slots\n",
           (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_marked), (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_swept));
@@ -777,6 +801,7 @@ char *sp_str_alloc_ext(size_t len) { return sp_str_alloc(len); }
 __attribute__((constructor)) static void sp_alloc_install_hooks(void) {
   sp_gc_str_sweep_hook = sp_str_sweep_gated;
   sp_gc_obj_retune_hook = sp_gc_retune_object;
+  sp_alloc_floors_from_env();
 }
 
 /* Float#to_s / #inspect (declared in sp_alloc.h): shortest round-trip decimal.

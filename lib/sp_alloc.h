@@ -106,6 +106,7 @@ extern int    sp_str_stress_checked;     /* one-shot SPINEL_GC_STRESS check */
 extern int    sp_gc_stress_pin;          /* stress caps the retunes at the 2048 base (#3513) */
 #ifdef SP_THREADS
 void sp_alloc_stress_init(void);         /* race-free one-shot stress check (pre-helpers) */
+void sp_alloc_floors_from_env(void);
 void sp_alloc_worker_tune(int workers); /* size the collection budget for N workers (pre-helpers) */
 #endif
 
