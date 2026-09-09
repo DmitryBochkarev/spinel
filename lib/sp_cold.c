@@ -3643,7 +3643,16 @@ const char *sp_addrinfo_inspect(sp_Addrinfo *a) {SP_GC_ROOT(a);
   return sp_sprintf("#<Addrinfo: %s:%lld%s>", a->ip, (long long)a->port, st);
 }
 const char *sp_brat_to_s(sp_BigRational *r) {SP_GC_ROOT(r);
-  const char *ns = sp_bigint_to_s(r->num), *ds = sp_bigint_to_s(r->den);
+  /* Each text is a fresh string-heap string that nothing but its local refers
+     to across an allocation: the numerator's while the denominator's is
+     converted, the denominator's while the inner concat builds "num/". A
+     collection landing in either window swept that text, and the Rational
+     read back as "/1" or "3/" on a plain build. sp_str_concat roots its own
+     arguments, so these two locals are the only bare holds. */
+  const char *ns = sp_bigint_to_s(r->num);
+  SP_GC_ROOT_STR(ns);
+  const char *ds = sp_bigint_to_s(r->den);
+  SP_GC_ROOT_STR(ds);
   return sp_str_concat(sp_str_concat(ns, SPL("/")), ds);
 }
 const char *sp_brat_inspect(sp_BigRational *r) {SP_GC_ROOT(r);
