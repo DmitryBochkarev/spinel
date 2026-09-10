@@ -904,11 +904,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, " const char *_t%d = NULL;"
                     " if (_t%d >= 0 && _t%d < _t%d && _t%d > 0) {"
                     " if (_t%d > _t%d - _t%d) _t%d = _t%d - _t%d;"
-                    " _t%d = sp_str_sub_range(_t%d, _t%d, _t%d);",
+                    " _t%d = sp_str_sub_range(_t%d, _t%d, _t%d);"
+                    " SP_GC_ROOT_STR(_t%d);",
                  tr2,
                  tb2, tb2, tn2, tl2,
                  tl2, tn2, tb2, tl2, tn2, tb2,
-                 tr2, to, tb2, tl2);
+                 tr2, to, tb2, tl2, tr2);
       if (sb_asgn) {
         buf_puts(b, " ");
         emit_expr(c, recv, b);
@@ -961,6 +962,8 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
                  tr2);
       emit_expr(c, recv, b);
       buf_printf(b, ", _t%d, _t%d); ", ti2, tl2);
+      /* the removed part must outlive the three allocations that rebuild the receiver */
+      buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", tr2);
       emit_expr(c, recv, b);
       buf_puts(b, " = sp_str_concat(sp_str_sub_range(");
       emit_expr(c, recv, b);
