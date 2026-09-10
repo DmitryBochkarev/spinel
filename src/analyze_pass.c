@@ -6939,15 +6939,28 @@ int infer_block_params(Compiler *c) {
       else {
         TyKind rt0 = infer_type(c, recv);
         if (ty_is_object(rt0)) mi = comp_method_in_chain(c, ty_object_class(rt0), name, NULL);
-        /* Class.new { |...| }: the yielding method is Class#initialize */
-        if (mi < 0 && sp_streq(name, "new") &&
-            nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ConstantReadNode")) {
+        /* Class.new { |...| }: the yielding method is Class#initialize.
+           A ConstantPATH receiver counts: `N::Conn` names a class as much as
+           `Conn` does, and reading only the bare form left `mi` unresolved,
+           which drops through to the poly widening below (#4416). */
+        int recv_is_const = nt_type(nt, recv) &&
+                            (sp_streq(nt_type(nt, recv), "ConstantReadNode") ||
+                             sp_streq(nt_type(nt, recv), "ConstantPathNode"));
+        if (mi < 0 && sp_streq(name, "new") && recv_is_const) {
           const char *cname = nt_str(nt, recv, "name");
           int cid = cname ? comp_class_index(c, cname) : -1;
           if (cid >= 0) mi = comp_method_in_chain(c, cid, "initialize", NULL);
         }
-        /* Class.method { ... }: look up the class method */
-        if (mi < 0 && nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ConstantReadNode")) {
+        /* Class.method { ... }: look up the class method. This is where the
+           block's parameters get their types from what the method YIELDS, so
+           missing the path spelling did not fail loudly -- it typed the
+           parameter poly, and the call inside the block then went through a
+           class switch instead of a direct call. On a name the caller's own
+           class also defines, that switch opens an arm for the CALLER, and
+           inlining a yielding method into itself exhausts the inline depth:
+           the "calls itself recursively" diagnostic on #4416 is this, three
+           steps downstream. */
+        if (mi < 0 && recv_is_const) {
           const char *cname = nt_str(nt, recv, "name");
           int cid = cname ? comp_class_index(c, cname) : -1;
           if (cid >= 0) mi = comp_cmethod_in_chain(c, cid, name, NULL);
