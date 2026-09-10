@@ -414,15 +414,31 @@ It contains the generated C, the runtime sources, the sources of every native
 package the build links, and a Makefile. `--out DIR` puts it somewhere else.
 One executable at a time; name it when the project has several.
 
-**The Makefile is derived, not written.** `spinel --print-cc` reports the
-command the compiler would have run, and the Makefile is that command with its
-paths rewritten to the pack's own. A second copy of the build knowledge would
-drift from the first, and a drifted copy breaks only on the machine the pack
-was sent to, which is the least diagnosable place for it. The same flags reach
-the runtime sources for the same reason: a threaded program needs
-`-DSP_THREADS` when compiling the runtime as much as when compiling its own
-translation unit, and the generated code writes its own `extern`s, so a
-mismatch there links and then misbehaves rather than failing.
+**The Makefile is derived, not written.** `spinel --print-build` reports the
+ingredients the program requires -- its defines, include paths, libraries and
+link inputs, one per line -- and the Makefile is those with their paths
+rewritten to the pack's own. A second copy of the build knowledge would drift
+from the first, and a drifted copy breaks only on the machine the pack was sent
+to, which is the least diagnosable place for it. The same defines reach the
+runtime sources for the same reason: a threaded program needs `-DSP_THREADS`
+when compiling the runtime as much as when compiling its own translation unit,
+and the generated code writes its own `extern`s, so a mismatch there links and
+then misbehaves rather than failing.
+
+**What it does not report is a compiler.** Which `cc` compiles the C is the
+recipient's decision and not spinel's: a pack cross-compiled for another target
+brings its own toolchain, and the ingredients are exactly what has to survive
+that. So `CC` and `CFLAGS` in the generated Makefile are defaults rather than
+decisions -- `make CC=arm-none-eabi-gcc` builds the same program -- and the
+packer's own optimisation level, warning policy, diagnostic formatting and
+linker section-GC flags stay behind, where an unfamiliar compiler cannot
+reject them.
+
+**The compiler does have to be GCC-compatible.** The runtime headers use
+`__attribute__((cleanup))` (every GC root is one), `__COUNTER__`, statement
+expressions and `__typeof__`, and the generated C uses statement expressions
+throughout. gcc and clang qualify, including cross builds of them; a strict
+ISO C compiler does not.
 
 **The runtime travels as source, not as `libspinel_rt.a`.** That is not
 thoroughness. The generated C includes the runtime headers and around 270 of

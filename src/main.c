@@ -80,6 +80,29 @@ static void s_add_arg(Str *s, const char *t) {
   s_add(s, "\" ");
 }
 
+/* --print-build writes the ingredients spinel is authoritative about, one per
+   line as `kind value`. The consumer is a program, and the previous spelling
+   of this printed the whole cc command line instead -- which meant `spin pack`
+   had to carry a quote-aware shell splitter and a token classifier to recover
+   the categories the command had just been assembled from. Naming a compiler
+   was the other half of the mistake: which cc compiles the C is the caller's
+   decision (a cross toolchain, say), and none of spinel's business. What IS
+   spinel's business is the defines, the include paths, the libraries and the
+   inputs, because those have to agree with how the runtime archive was built.
+   Optimisation, warnings, diagnostics and section GC are deliberately absent:
+   they are how THIS build was run, not what the program requires. */
+static void bi_put(Str *bi, const char *kind, const char *val) {
+  if (!val || !*val) return;
+  s_add(bi, kind); s_add(bi, " "); s_add(bi, val); s_add(bi, "\n");
+}
+static void bi_put_toks(Str *bi, const char *kind, const char *toks) {
+  if (!toks || !*toks) return;
+  char *d = strdup(toks);
+  if (!d) return;
+  for (char *t = strtok(d, " \t"); t; t = strtok(NULL, " \t")) bi_put(bi, kind, t);
+  free(d);
+}
+
 static void set_env(const char *k, const char *v) {
   setenv(k, v, 1);
 }
@@ -241,7 +264,7 @@ static void usage(void) {
     "       spinel app.rb -o myapp     - compile to ./myapp\n"
     "       spinel app.rb -c           - generate app.c only\n"
     "       spinel app.rb -S           - print C to stdout\n"
-    "       spinel app.rb --print-cc   - print the cc command, compile nothing\n"
+    "       spinel app.rb --print-build - print the build ingredients, compile nothing\n"
     "       spinel -e 'puts 42'        - compile inline source\n"
     "       spinel -E app.rb a b c     - compile + run with ARGV=[a, b, c]\n\n"
     "Options:\n"
@@ -285,7 +308,7 @@ int main(int argc, char **argv) {
   const char *int_overflow = "raise";
   const char *rbs_dir = NULL;
   int c_only = 0, stdout_mode = 0, run_mode = 0, dump_ast = 0;
-  int print_cc = 0;   /* --print-cc: emit the cc command line, run nothing */
+  int print_build = 0;   /* --print-build: emit the build ingredients, run nothing */
   int emit_rbs = 0, emit_types = 0, emit_symbol_map = 0;
   int debug = 0, line_map = 1, want_g = 0, profile = 0;
   /* Accumulated -e source and the program ARGV after the -E boundary. */
@@ -346,7 +369,7 @@ int main(int argc, char **argv) {
     else if (sp_streq(a, "-I"))            { if (++i < argc) sp_add_feature_root(argv[i]); i++; }
     else if (!strncmp(a, "-I", 2) && a[2]) { sp_add_feature_root(a + 2); i++; }
     else if (sp_streq(a, "-S"))            { stdout_mode = 1; i++; }
-    else if (sp_streq(a, "--print-cc"))    { print_cc = 1; i++; }
+    else if (sp_streq(a, "--print-build")) { print_build = 1; i++; }
     else if (sp_streq(a, "-E"))            { run_mode = 1; i++; }
     else if (sp_streq(a, "--emit-rbs"))    { emit_rbs = 1; i++; }
     else if (sp_streq(a, "--emit-types"))  { emit_types = 1; i++; }
@@ -656,6 +679,10 @@ int main(int argc, char **argv) {
   }
 
   Str cmd = {0};
+  /* Filled alongside cmd, one ingredient at a time, so the two cannot say
+     different things: a category line is written at the same statement that
+     puts the flag on the command line. */
+  Str bi = {0};
   char tmp[8192];
   s_add(&cmd, cc_cmd);
   s_add(&cmd, " ");
@@ -705,13 +732,23 @@ int main(int argc, char **argv) {
   }
   if (fiber_frame_guard) s_add(&cmd, "-Wframe-larger-than=65536 ");
   snprintf(tmp, sizeof tmp, "-I\"%s\" -I\"%s%cregexp\" ", lib_dir, lib_dir, PATH_SEP); s_add(&cmd, tmp);
+  bi_put(&bi, "include", lib_dir);
+  { char rgi[4096]; snprintf(rgi, sizeof rgi, "%s%cregexp", lib_dir, PATH_SEP); bi_put(&bi, "include", rgi); }
   /* Compile the generated TU with the same threading define as the mt runtime
      archive it links, so the per-worker SP_TLS globals (sp_gc_roots, ...) it
      references through the runtime headers get the matching thread-local
      storage class. initial-exec keeps those reads a single segment load. */
-  if (uses_threads) s_add(&cmd, "-DSP_THREADS -ftls-model=initial-exec ");
+  if (uses_threads) {
+    s_add(&cmd, "-DSP_THREADS -ftls-model=initial-exec ");
+    bi_put(&bi, "define", "-DSP_THREADS");
+    /* Not an optimisation the caller may drop: the generated TU and the mt
+       archive have to agree on the storage class of the per-worker globals. */
+    bi_put(&bi, "cflag", "-ftls-model=initial-exec");
+  }
   if (ffi_cflags.p) s_add(&cmd, ffi_cflags.p);
+  bi_put_toks(&bi, "cflag", ffi_cflags.p);
   s_add_arg(&cmd, c_path);
+  bi_put(&bi, "source", c_path);
   /* --link objects/archives sit between the generated TU and the runtime
      archive: they reference sp_ runtime symbols, and ld resolves left to
      right. --link -l flags go after -lm below, where DSOs belong. */
@@ -737,7 +774,9 @@ int main(int argc, char **argv) {
           snprintf(mtv, sizeof mtv, "%.*s_mt%s", (int)stem, in, dot);
       }
     }
-    s_add_arg(&cmd, (mtv[0] && access(mtv, F_OK) == 0) ? mtv : in);
+    { const char *chosen = (mtv[0] && access(mtv, F_OK) == 0) ? mtv : in;
+      s_add_arg(&cmd, chosen);
+      bi_put(&bi, "link", chosen); }
   }
   /* native_obj carried-C objects: resolve each root-relative path against the
      base dir (lib_dir minus its trailing "/lib", where packages/ also lives)
@@ -789,21 +828,29 @@ int main(int argc, char **argv) {
         if (access(op, F_OK) == 0) placed = 1;
       }
       s_add_arg(&cmd, op);
+      bi_put(&bi, "link", op);
     }
     free(toks);
   }
   snprintf(tmp, sizeof tmp, "\"%s%c%s\" ", lib_dir, PATH_SEP, rt_lib); s_add(&cmd, tmp);
+  { char rtp[4096]; snprintf(rtp, sizeof rtp, "%s%c%s", lib_dir, PATH_SEP, rt_lib); bi_put(&bi, "runtime", rtp); }
   /* -lm AFTER the archive: ld processes inputs left to right and (with the
      GNU default --as-needed) drops a DSO no preceding input references.
      sp_format.o pulls in sqrt/sin/cos, so libm must follow libspinel_rt.a. */
   s_add(&cmd, "-lm ");
+  bi_put(&bi, "lib", "-lm");
 #if !defined(__APPLE__)
   s_add(&cmd, "-lcrypt ");  /* String#crypt = libc crypt(3); --as-needed drops it when unused */
+  bi_put(&bi, "lib", "-lcrypt");
 #endif
   for (int li = 0; li < n_link_extra; li++)
-    if (strncmp(link_extra[li], "-l", 2) == 0) { s_add(&cmd, link_extra[li]); s_add(&cmd, " "); }
-  if (uses_threads) s_add(&cmd, "-lpthread ");
+    if (strncmp(link_extra[li], "-l", 2) == 0) {
+      s_add(&cmd, link_extra[li]); s_add(&cmd, " ");
+      bi_put(&bi, "lib", link_extra[li]);
+    }
+  if (uses_threads) { s_add(&cmd, "-lpthread "); bi_put(&bi, "lib", "-lpthread"); }
   s_add(&cmd, ov_define); s_add(&cmd, " ");
+  bi_put(&bi, "define", ov_define);
   if (want_g) s_add(&cmd, "-g ");
   if (profile) s_add(&cmd, "-fno-omit-frame-pointer ");
 #if !defined(__APPLE__)
@@ -829,7 +876,7 @@ int main(int argc, char **argv) {
           if (strcmp(lb, want_a) == 0 || strcmp(lb, want_so) == 0) covered = 1;
         }
       }
-      if (!covered) { s_add(&cmd, t); s_add(&cmd, " "); }
+      if (!covered) { s_add(&cmd, t); s_add(&cmd, " "); bi_put(&bi, "lib", t); }
     }
     free(ltoks);
   }
@@ -843,12 +890,16 @@ int main(int argc, char **argv) {
   free(ffi_links.p);
   free(ffi_cflags.p);
 
-  /* `--print-cc`: say what would be run instead of running it. The point is
-     that a build recipe generated elsewhere -- `spin pack`'s Makefile -- is
-     derived from THIS line rather than from a second copy of the same
-     knowledge. A copy drifts, and a drifted copy breaks only on the machine
-     the pack was sent to, which is the least diagnosable place for it. */
-  if (print_cc) { printf("%s\n", cmd.p); free(cmd.p); return 0; }
+  /* `--print-build`: say what the program REQUIRES instead of building it. A
+     build recipe generated elsewhere -- `spin pack`'s Makefile -- is derived
+     from these lines rather than from a second copy of the same knowledge. A
+     copy drifts, and a drifted copy breaks only on the machine the pack was
+     sent to, which is the least diagnosable place for it. What is deliberately
+     NOT here is the compiler and how this build was run: a recipient
+     cross-compiling for another target picks their own cc and their own
+     optimisation, and the ingredients below are what has to survive that. */
+  if (print_build) { fputs(bi.p ? bi.p : "", stdout); free(cmd.p); free(bi.p); return 0; }
+  free(bi.p);
   int cc_rc = system(cmd.p);
   free(cmd.p);
   if (cc_rc != 0) {

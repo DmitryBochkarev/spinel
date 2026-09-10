@@ -907,9 +907,36 @@ REF=$("$SPIN" run 2>&1 | tail -2 | tr '\n' '|')
 [ -f build/pack/packer/native/sp_json.c ] || fail "pack: native package not carried as source"
 grep -q -- "-DSP_THREADS" build/pack/packer/Makefile || fail "pack: threaded program without -DSP_THREADS"
 grep -q -- "-lpthread" build/pack/packer/Makefile || fail "pack: threaded program without -lpthread"
+# What the pack must NOT carry: how THIS build was run. The compiler reports
+# ingredients, not a command line, so the packer's optimisation level, its
+# warning policy, its diagnostic formatting and its linker's spelling of
+# section GC stay behind. These reached the recipient's Makefile when the pack
+# was derived from `--print-cc`, and an unfamiliar compiler rejects them.
+for host_flag in -Werror= -fmax-errors -fno-show-column -fno-diagnostics-show-caret -fno-caret-diagnostics --gc-sections -dead_strip -ffunction-sections; do
+  grep -q -- "$host_flag" build/pack/packer/Makefile && \
+    fail "pack: Makefile carries the packer's own $host_flag"
+done
 # the build itself, with PATH holding no spinel and no spin
 ( cd build/pack/packer && make -j4 >/dev/null 2>&1 ) || fail "pack: make in the pack"
 OUT=$( cd build/pack/packer && ./packer 2>&1 | tail -2 | tr '\n' '|' )
 expect "pack builds from C alone and answers the same" "$REF" "$OUT"
+
+# The recipient's compiler is theirs to choose -- the reason the report names
+# no cc at all. Prove the Makefile actually routes through $(CC) rather than
+# naming one: build again through a wrapper and check the wrapper ran. A
+# wrapper is the portable version of this test; asserting on `clang` would
+# only run where clang happens to be installed.
+cat > "$WORK/wrapcc" <<WRAPEOF
+#!/bin/sh
+echo used >> "$WORK/wrapcc.log"
+exec ${CC:-cc} "\$@"
+WRAPEOF
+chmod +x "$WORK/wrapcc"
+rm -f "$WORK/wrapcc.log"
+( cd build/pack/packer && make clean >/dev/null 2>&1 && make -j4 CC="$WORK/wrapcc" >/dev/null 2>&1 ) || \
+  fail "pack: make CC=<other compiler> in the pack"
+[ -s "$WORK/wrapcc.log" ] || fail "pack: Makefile ignored CC"
+OUT2=$( cd build/pack/packer && ./packer 2>&1 | tail -2 | tr '\n' '|' )
+expect "pack honours CC and answers the same" "$REF" "$OUT2"
 
 echo "spin-e2e: ALL GREEN"
