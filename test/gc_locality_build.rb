@@ -11,8 +11,11 @@
 #   LOCALITY_BUILD=1   one green thread allocates the whole graph
 #   LOCALITY_BUILD=N   N green threads allocate 1/N of it each
 #
-# The answer, measured with ns/object = mark seconds / objects marked (Apple
-# M-series, 6 performance cores, both budgets pinned, two passes per cell).
+# The answer, measured with ns/object = mark seconds / objects marked (Apple M4
+# Max -- 12 performance cores in two clusters of six, 16 MiB of L2 per cluster,
+# no conventional L3 -- both budgets pinned, two passes per cell). THE LADDER
+# BELOW IS ONE MACHINE'S, and that turned out to be the whole of it: see the
+# paragraph after the second table.
 # `parts` is the participant count the [gc] line reports -- see the third
 # control below, which is why the column is here at all:
 #
@@ -27,12 +30,38 @@
 # than one worker allocated. The W=1 row is what makes that a statement about
 # workers rather than about the graph: BUILD=8 there still builds eight
 # separate lists from eight green threads, and costs what BUILD=1 costs,
-# because one worker's free list served all of them.
+# because one worker did all of the allocating.
 #
 # Holding the pool at W=8 and varying only the builders shows it is a STEP and
 # not a gradient -- 4.08, 5.65, 5.72, 5.68, 5.87 ns/object at 1, 2, 4, 8 and 16
-# builders. The first extra allocator costs 39%; the next fourteen cost
-# nothing. One free list against more than one.
+# builders. The first extra allocator costs 39%; the next fourteen cost nothing.
+#
+# WHAT THE STEP IS NOT, AND WHERE IT IS NOT (#4384). This file first read the
+# step as allocation locality -- one worker laying a linked structure down in
+# traversal order, and any interleaving destroying that. IT IS NOT THAT, and
+# the numbers above should not be quoted as if it were:
+#
+#   * The ADDRESSES are the same in both arms. Walked in traversal order on the
+#     machine above, the stride from one node to the next is 80 B at one builder
+#     and 80 B at eight, 98% of steps stay inside one 4 KB page in every arm,
+#     and 69 steps out of 399,999 cross more than 1 MB. Object-granularity
+#     interleaving would put ~NODES of them there.
+#   * It is not CACHE CAPACITY. The ratio holds at ~1.3x from a 5 MB graph that
+#     fits in a cluster's L2 to an 88 MB graph that does not. A capacity effect
+#     would have a knee; this has none.
+#   * It is not the per-worker STRING heap, which is the only per-worker list
+#     spinel owns (sp_gc_alloc is a plain calloc plus a CAS push onto ONE global
+#     heap list -- nothing recycles object storage). Give Node an Integer
+#     payload instead of a String and the step survives at ~1.5x.
+#   * It is NOT ON EITHER LINUX BOX IT HAS BEEN RUN ON. On an AMD Ryzen 5 3600
+#     (6 cores, 2 CCX) the ladder is 16.9 - 18.2 ns/object across every cell,
+#     BUILD=8 marginally the faster arm, participant control verified.
+#
+# So the step is one machine's, the worker axis on that machine (1.27x) is far
+# short of the application ladder it was extracted to explain (2.04x, measured
+# on the Ryzen box), and no allocator or placement change should be started
+# from it. What this program still earns its place for is the CORRECTNESS
+# property below, which holds on every box.
 #
 # TO RUN THE LADDER, with the three controls that make it mean anything. All
 # three silently invalidate it and none of them warns:
