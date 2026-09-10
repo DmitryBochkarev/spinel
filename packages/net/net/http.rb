@@ -246,9 +246,19 @@ module Net
     attr_reader :address, :port
     attr_accessor :use_ssl, :open_timeout, :read_timeout
 
+    # The address to CONNECT to, when it differs from the address the request
+    # is addressed to. An application that resolves a hostname itself and then
+    # pins the result -- which is how a Rails app defends against DNS
+    # rebinding, resolving once and connecting to that literal -- passes the
+    # resolved IP here and keeps the hostname for `Host:` and for the TLS
+    # certificate. Held as a String rather than nil-or-String: empty means
+    # unset. CRuby's reader answers nil there, and this one answers "".
+    attr_accessor :ipaddr
+
     def initialize(address, port = 80)
       @address = address
       @port = port
+      @ipaddr = ""
       @use_ssl = false
       @open_timeout = 60
       @read_timeout = 60
@@ -267,9 +277,12 @@ module Net
     end
 
     # Net::HTTP.start(host, port, use_ssl: true) { |http| ... }
-    def self.start(address, port = 80, use_ssl: false)
+    # `ipaddr:` is the connect target; `Host:` and the TLS hostname stay
+    # `address`. `nil` reads as unset, which is what CRuby's default is.
+    def self.start(address, port = 80, use_ssl: false, ipaddr: nil)
       http = HTTP.new(address, port)
       http.use_ssl = use_ssl
+      http.ipaddr = ipaddr.to_s
       http.start
       begin
         yield http
@@ -344,17 +357,18 @@ module Net
     # which is how CRuby reads nil there.
     def connect_with_timeout
       limit = @open_timeout.nil? ? 0 : @open_timeout
-      return TCPSocket.new(@address, @port) if limit <= 0
+      target = @ipaddr.empty? ? @address : @ipaddr
+      return TCPSocket.new(target, @port) if limit <= 0
       s = Socket.new(Socket::AF_INET, Socket::SOCK_STREAM, 0)
       begin
-        s.connect_nonblock(@address, @port)
+        s.connect_nonblock(target, @port)
       rescue IO::WaitWritable
         if IO.select(nil, [s], nil, limit).nil?
           s.close
           raise OpenTimeout
         end
         begin
-          s.connect_nonblock(@address, @port)
+          s.connect_nonblock(target, @port)
         rescue Errno::EISCONN
           # already connected: the wait above is what completed it
         end
@@ -392,7 +406,23 @@ module Net
       request(req)
     end
 
-    def request(req)
+    # A block gets the response, as CRuby's does. CRuby streams the body to it;
+    # this reads the body whole first, so the block sees a complete response --
+    # the difference is when the bytes arrive, not what the block is handed.
+    # The transport lives in `perform` so that the reconnect recursion below
+    # has no block to forward and this method has exactly one place to call it.
+    # `&blk` rather than `yield ... if block_given?`: the latter makes this a
+    # YIELDING method, which is inlined at its call sites, and the no-block
+    # spelling then found no arm here (`undefined method 'request'` at run
+    # time). A declared block parameter keeps one ordinary function for both
+    # spellings.
+    def request(req, &blk)
+      res = perform(req)
+      blk.call(res) unless blk.nil?
+      res
+    end
+
+    def perform(req)
       # CRuby opens a connection for a #request on an unstarted Net::HTTP, runs
       # the request over it and closes it again -- so `Net::HTTP.new(host,
       # port).request(req)` works without a `start`, and is the spelling a
@@ -406,7 +436,7 @@ module Net
         # when there is nothing open, which is the other way start can fail.
         begin
           start
-          return request(req)
+          return perform(req)
         ensure
           finish
         end
