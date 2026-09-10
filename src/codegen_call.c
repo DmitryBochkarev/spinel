@@ -8668,13 +8668,36 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "), %d)", eq ? 1 : 0);
       return 1;
     }
+    /* One side nil by INFERENCE rather than by literal: a call the analyzer
+       proved returns nil, compared with a concrete operand. The answers below
+       are already right for it -- what stood in the way was the gate, which
+       asked whether the NODE was a NilNode, so `"png" != f.content_type`
+       reached the refusal at the end of this function while `got = f.content_type;
+       "png" != got` compiled (#4415). The one difference a non-literal makes is
+       that it has to be EVALUATED: a literal nil can be dropped, a call cannot,
+       and Ruby's order is receiver then argument either way. */
+    int a_niltyped = !a_nil && a0 == TY_NIL && rt != TY_NIL;
+    int r_niltyped = !r_nil && rt == TY_NIL && a0 != TY_NIL;
     /* `x == nil` / `x != nil` for any receiver */
-    if (a_nil || r_nil) {
-      int other = a_nil ? recv : argv[0];
+    if (a_nil || r_nil || a_niltyped || r_niltyped) {
+      int other = (a_nil || a_niltyped) ? recv : argv[0];
       TyKind ot = comp_ntype(c, other);
       /* recv.==(nil): user object may override ==; dispatch to its method.
-         nil.==(obj): NilClass#== is identity-only, so false for any object. */
-      if (a_nil && ty_is_object(ot)) goto equality_skip_nil;
+         nil.==(obj): NilClass#== is identity-only, so false for any object.
+         Decided before anything is written, so the wrap below cannot be left
+         half-emitted across the goto. */
+      if ((a_nil || a_niltyped) && ty_is_object(ot)) goto equality_skip_nil;
+      /* The nil-typed operand's evaluation. As the RECEIVER it runs before the
+         test, which a comma expresses; as the ARGUMENT it runs after the
+         receiver, which needs the test's value held while it runs. */
+      int nt_tmp = 0;
+      if (r_niltyped) {
+        buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), ");
+      }
+      else if (a_niltyped) {
+        nt_tmp = ++g_tmp;
+        buf_printf(b, "({ sp_bool _t%d = ", nt_tmp);
+      }
       if (ot == TY_POLY) {
         buf_puts(b, eq ? "sp_poly_nil_p(" : "(!sp_poly_nil_p(");
         emit_expr(c, other, b); buf_puts(b, eq ? ")" : "))");
@@ -8699,6 +8722,11 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "(("); emit_expr(c, other, b); buf_printf(b, ") %s 0)", eq ? "==" : "!=");
       }
       else { buf_puts(b, "(("); emit_expr(c, other, b); buf_printf(b, "), %d)", eq ? 0 : 1); }
+      if (r_niltyped) buf_puts(b, ")");
+      else if (a_niltyped) {
+        buf_puts(b, "; (void)("); emit_expr(c, argv[0], b);
+        buf_printf(b, "); _t%d; })", nt_tmp);
+      }
       return 1;
     }
     equality_skip_nil:;
