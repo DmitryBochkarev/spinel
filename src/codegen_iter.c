@@ -1403,7 +1403,6 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(&sw, indent + 1); buf_puts(&sw, "break;\n");
     emit_indent(&sw, indent); buf_puts(&sw, "}\n");
   }
-  Buf *b_sv = b; b = &sw;
   int emitted_default = 0;
   /* map!/collect!: the poly value can also be a BUILTIN array at run time
      (a nested-array element) -- without this default arm the switch missed
@@ -1416,33 +1415,33 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
     int dbn = 0; const int *dbb = dbody >= 0 ? nt_arr(nt, dbody, "body", &dbn) : NULL;
     if (dbn >= 1 && dp0r) {
       int tw = ++g_tmp, ti2 = ++g_tmp;
-      emit_indent(b, indent); buf_puts(b, "default: {\n");
-      emit_indent(b, indent + 1);
-      buf_printf(b, "sp_PolyArray *_t%d = sp_poly_arr_recv(_t%d, \"map!\"); SP_GC_ROOT(_t%d);\n",
+      emit_indent(&sw, indent); buf_puts(&sw, "default: {\n");
+      emit_indent(&sw, indent + 1);
+      buf_printf(&sw, "sp_PolyArray *_t%d = sp_poly_arr_recv(_t%d, \"map!\"); SP_GC_ROOT(_t%d);\n",
                  tw, trecv, tw);
       /* The loop below stores into the array's elements directly rather than
          through a runtime mutator, so it carries its own write barrier: the
          receiver may be an old array taking references to values this loop
          has just made. Once before the loop is enough -- the remembered set
          dedupes on the object, not the store. */
-      emit_indent(b, indent + 1);
-      buf_printf(b, "sp_gc_wb((void *)_t%d);\n", tw);
-      emit_indent(b, indent + 1);
-      buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti2, ti2, tw, ti2);
-      emit_indent(b, indent + 2);
-      buf_printf(b, "lv_%s = sp_PolyArray_get(_t%d, _t%d);\n", dp0r, tw, ti2);
+      emit_indent(&sw, indent + 1);
+      buf_printf(&sw, "sp_gc_wb((void *)_t%d);\n", tw);
+      emit_indent(&sw, indent + 1);
+      buf_printf(&sw, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti2, ti2, tw, ti2);
+      emit_indent(&sw, indent + 2);
+      buf_printf(&sw, "lv_%s = sp_PolyArray_get(_t%d, _t%d);\n", dp0r, tw, ti2);
       for (int j2 = 0; j2 + 1 < dbn; j2++) emit_stmt(c, dbb[j2], b, indent + 2);
       { int svi = g_indent; g_indent = indent + 2;
         Buf vb2; memset(&vb2, 0, sizeof vb2); emit_boxed(c, dbb[dbn - 1], &vb2);
         g_indent = svi;
-        emit_indent(b, indent + 2);
-        buf_printf(b, "_t%d->data[_t%d] = %s;\n", tw, ti2, vb2.p ? vb2.p : "sp_box_nil()");
+        emit_indent(&sw, indent + 2);
+        buf_printf(&sw, "_t%d->data[_t%d] = %s;\n", tw, ti2, vb2.p ? vb2.p : "sp_box_nil()");
         free(vb2.p); }
-      emit_indent(b, indent + 1); buf_puts(b, "}\n");
-      emit_indent(b, indent + 1);
-      buf_printf(b, "sp_poly_arr_writeback(_t%d, _t%d);\n", trecv, tw);
-      emit_indent(b, indent + 1); buf_puts(b, "break;\n");
-      emit_indent(b, indent); buf_puts(b, "}\n");
+      emit_indent(&sw, indent + 1); buf_puts(&sw, "}\n");
+      emit_indent(&sw, indent + 1);
+      buf_printf(&sw, "sp_poly_arr_writeback(_t%d, _t%d);\n", trecv, tw);
+      emit_indent(&sw, indent + 1); buf_puts(&sw, "break;\n");
+      emit_indent(&sw, indent); buf_puts(&sw, "}\n");
       emitted_default = 1;
     }
   }
@@ -1454,11 +1453,12 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
      and previously silent. (#3234 is the same hole in this switch, found from
      the builtin-array side and patched only for map!/collect!.) */
   if (!emitted_default) {
-    emit_indent(b, indent); buf_puts(b, "default: ");
-    buf_printf(b, "sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;\n", name, trecv);
+    emit_indent(&sw, indent); buf_puts(&sw, "default: ");
+    buf_printf(&sw, "sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;\n", name, trecv);
   }
-  emit_indent(b, indent); buf_puts(b, "}\n");
-  b = b_sv;
+  emit_indent(&sw, indent); buf_puts(&sw, "}\n");
+  /* Committed only now: every arm emitted a body, so the switch is complete
+     and the caller's buffer sees it for the first time here. */
   if (sw.p) buf_puts(b, sw.p);
   free(sw.p);
   return 1;
