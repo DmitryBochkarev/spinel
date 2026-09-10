@@ -567,6 +567,13 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_printf(b, "{ sp_Exception *_t%d = (sp_Exception *)(", ev); emit_expr(c, arg, b);
     buf_printf(b, "); fputs(_t%d ? sp_sprintf(\"#<%%s: %%s>\", sp_exc_class_name(_t%d), sp_exc_message(_t%d)) : \"nil\", stdout); putchar('\\n'); }\n", ev, ev, ev);
   }
+  else if (t == TY_MUTEX || t == TY_QUEUE || t == TY_CONDVAR) {
+    /* the concurrency handles render as Object's default does (#4421) */
+    const char *hn = t == TY_MUTEX ? "Thread::Mutex"
+                   : t == TY_QUEUE ? "Thread::Queue" : "Thread::ConditionVariable";
+    buf_puts(b, "{ void *_po = (void *)("); emit_expr(c, arg, b);
+    buf_printf(b, "); fputs(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"nil\", stdout); putchar('\\n'); }\n", hn);
+  }
   else if (ty_is_object(t)) {
     /* p obj: a user #inspect wins; otherwise the generated per-class ivar
        walk renders CRuby's default #<Name:0xADDR @a=..., ...> */

@@ -2467,7 +2467,18 @@ else {
                  sp_streq(cn, "UNIXServer") || sp_streq(cn, "Socket")) &&
           sp_feature_required("socket")) return TY_IO;
       if (cn && sp_streq(cn, "OpenStruct") && sp_feature_required("ostruct")) return TY_OPENSTRUCT;
-      if (cn && (sp_streq(cn, "Thread") || sp_streq(cn, "Mutex") || (sp_streq(cn, "Monitor") && sp_feature_enabled("monitor")) ||
+      /* A Mutex reached through a PATH is the same Mutex. `Thread::Mutex` is
+         CRuby's own name for the class, and the bare-constant branch types
+         `Mutex.new` TY_MUTEX -- but the path spelling fell into the boxed
+         catch-all below, so the local was declared sp_RbVal while the emitter
+         still wrote sp_Mutex_new() and the C did not compile (#4421).
+         Thread::Queue, Thread::SizedQueue and Thread::ConditionVariable were
+         never in that catch-all and have always worked through the path
+         spelling, which is what made this one look arbitrary rather than
+         missing. */
+      if (cn && (sp_streq(cn, "Mutex") || (sp_streq(cn, "Monitor") && sp_feature_enabled("monitor"))))
+        return TY_MUTEX;
+      if (cn && (sp_streq(cn, "Thread") || (sp_streq(cn, "Monitor") && sp_feature_enabled("monitor")) ||
                  sp_streq(cn, "Random") || sp_streq(cn, "IO") ||
                  sp_streq(cn, "GzipReader") || sp_streq(cn, "GzipWriter"))) return TY_POLY;
     }

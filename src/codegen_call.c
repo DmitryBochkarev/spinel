@@ -29141,6 +29141,23 @@ else {
     emit_expr(c, recv, b); buf_puts(b, "))");
     return;
   }
+  /* The concurrency handles render as Object's default does, which is what
+     CRuby prints for them: #<Thread::Mutex:0x...>. Without an arm they reached
+     the nil-degrade below and `mutex.inspect` answered "[]" -- a silent wrong
+     answer rather than a gap, and `p mutex` refused to compile at all (#4421).
+     A SizedQueue shares TY_QUEUE with a Queue and so prints as Thread::Queue;
+     that divergence is in docs/limitations.md. Fiber and Thread are left out
+     deliberately: CRuby's inspect for those carries state (a Fiber's source
+     location and status, a Thread's run state) that this cannot supply, and a
+     truncated one would be a quieter wrong answer than the refusal. */
+  if (recv >= 0 && argc == 0 && (sp_streq(name, "inspect") || sp_streq(name, "to_s")) &&
+      (rt == TY_MUTEX || rt == TY_QUEUE || rt == TY_CONDVAR)) {
+    const char *hn = rt == TY_MUTEX ? "Thread::Mutex"
+                   : rt == TY_QUEUE ? "Thread::Queue" : "Thread::ConditionVariable";
+    buf_printf(b, "sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)(", hn);
+    emit_expr(c, recv, b); buf_puts(b, "))");
+    return;
+  }
   /* The nil-degrade placeholders must still emit the receiver: a chain like
      `cell.id.inspect` whose receiver is itself an unresolved call then reaches
      that call's own diagnostic (a compile-time NoMethodError) instead of
