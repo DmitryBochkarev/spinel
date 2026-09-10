@@ -1,0 +1,5 @@
+partition x|?|y?z
+rpartition x?y|?|z
+split ["x", "y", "z"]
+upcase X?Y?Z
+strip x?y?z

@@ -1164,6 +1164,33 @@ int exc_subclass_defines(Compiler *c, const char *name) {
   return 0;
 }
 
+/* Can a call ever arrive at an instance method of this class or module? Only
+   through a value that is one, so a class nobody instantiates -- and that no
+   instantiated class inherits from or includes -- has neither a direct call
+   site nor a poly-dispatch arm. The same test analyze.c makes for the
+   by-reference name group (#4390), for the same reason: a class nothing can
+   reach cannot own a name.
+
+   It matters here because owning a name takes the BUILTIN away. A program
+   that merely declared `Bucket#partition`, never instantiating Bucket, made a
+   valid `String#partition` on a boxed receiver compile to a dispatch with no
+   arms at all -- a switch whose only branch raises NoMethodError, naming
+   String, for a method String has (#4413). Unsure answers 1, which is the
+   old behaviour. */
+static int uk_class_can_be_reached(Compiler *c, int ci) {
+  if (ci < 0 || ci >= c->nclasses) return 1;
+  if (c->classes[ci].instantiated) return 1;
+  for (int j = 0; j < c->nclasses; j++) {
+    if (!c->classes[j].instantiated) continue;
+    for (int k = j; k >= 0; k = c->classes[k].parent)
+      if (k == ci) return 1;
+    for (int k = j; k >= 0; k = c->classes[k].parent)
+      for (int m = 0; m < c->classes[k].nincluded_mods; m++)
+        if (c->classes[k].included_mods[m] == ci) return 1;
+  }
+  return 0;
+}
+
 int user_defines_or_reads(Compiler *c, const char *name) {
   if (g_poly_builtin_arm) return 0;
   /* Instance reachability only: a CLASS method of the same name is reached
@@ -1171,12 +1198,12 @@ int user_defines_or_reads(Compiler *c, const char *name) {
      counting it made a String receiver decline the String method and bind to
      `def self.<name>` instead (#3520). */
   for (int uk = 0; uk < c->nclasses; uk++)
-    if (comp_method_in_chain(c, uk, name, NULL) >= 0) return 1;
+    if (comp_method_in_chain(c, uk, name, NULL) >= 0 && uk_class_can_be_reached(c, uk)) return 1;
   /* A top-level method is private on Object, so no explicit receiver can reach
      it and it never owns a name here -- the twin in analyze_infer.c carries the
      reasoning. */
   for (int uk = 0; uk < c->nclasses; uk++)
-    if (comp_is_reader(&c->classes[uk], name)) return 1;
+    if (comp_is_reader(&c->classes[uk], name) && uk_class_can_be_reached(c, uk)) return 1;
   return 0;
 }
 
