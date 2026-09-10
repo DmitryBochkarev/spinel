@@ -22833,7 +22833,44 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
              sp_streq(nt_type(nt, argv[0]), "HashNode")))
           kw_ctor = 1;
       }
-      if (!kw_ctor && (argc != np || nreq != np)) continue;   /* only an exact all-required match */
+      /* An `initialize` with OPTIONAL parameters is reachable at any argc
+         between its required count and its total, with the rest filled from
+         their defaults -- which is what a statically known `Klass.new` has
+         always done. The test here demanded argc == nparams == nrequired, so a
+         constructor as ordinary as `initialize(path, initheader = nil)` matched
+         no class at all, the switch came out EMPTY, and `k.new(x)` answered the
+         nil seed with no diagnostic (#4417). The report read the trigger as
+         nesting because the class that bit was `Net::HTTP::Get`; a top-level
+         class with the same signature does it too.
+         A struct's generated constructor has no scope to take defaults from, so
+         it keeps the exact test, and a default that reads self cannot be
+         evaluated at a call site. Both of those now decline into the raise
+         below rather than into nil. */
+      if (!kw_ctor) {
+        if (initm < 0 || c->classes[ci].is_struct) {
+          if (argc != np || nreq != np) continue;
+        }
+        else {
+          if (argc < nreq || argc > np) continue;
+          if (argc < np && ctor_needs_self_defaults(c, initm, argc)) continue;
+        }
+      }
+      /* A parameter and its argument both concretely typed but DIFFERENT is a
+         miscompile, not a coercion: the unbox below would read the argument's
+         bits as the parameter's type. `initialize(a = 1, b = 2)` types `a` Int,
+         so `k.new("x")` on it must not select this class. The class-method
+         prearm has always applied this rule; these two emitters reached it only
+         once optional parameters made such a class a candidate at all. */
+      { int incompat = 0;
+        Scope *cs = initm >= 0 ? &c->scopes[initm] : NULL;
+        for (int a2 = 0; cs && a2 < argc && a2 < cs->nparams && !incompat; a2++) {
+          LocalVar *cp = cs->pnames && cs->pnames[a2] ? scope_local(cs, cs->pnames[a2]) : NULL;
+          TyKind ptc = cp ? cp->type : TY_POLY;
+          TyKind atc = argv ? comp_ntype(c, argv[a2]) : TY_POLY;
+          if (ptc != TY_POLY && ptc != TY_UNKNOWN && atc != TY_POLY && atc != TY_UNKNOWN &&
+              ptc != atc) incompat = 1;
+        }
+        if (incompat) continue; }
       buf_printf(b, "case %d: _t%d=", ci, rt2);
       if (c->classes[ci].is_value_type)
         buf_printf(b, "sp_box_vobj_%s(sp_%s_new(", c->classes[ci].c_name, c->classes[ci].c_name);
@@ -22865,6 +22902,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
           buf_puts(b, "; })");
           continue;
         }
+        if (j >= argc && is2) { emit_arg_or_default(c, is2, j, -1, b); continue; }
         snprintf(tn, sizeof tn, "_t%d", atmp[j]);
         if (pt == TY_POLY) buf_puts(b, tn);
         else emit_unbox_text(c, pt, tn, b);
@@ -22872,7 +22910,13 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       if (c->classes[ci].is_value_type) buf_printf(b, "));break;");
       else buf_printf(b, "),%d);break;", ci);
     }
-    buf_printf(b, "} _t%d; })", rt2);
+    /* A class the switch has no arm for is a program that cannot construct it,
+       which is a raise -- the sibling emitter below has always said so. Without
+       this the seed fell out unchanged and the caller got nil, which is how
+       #4417 presented: no crash, no diagnostic, a nil that only misbehaves
+       later. */
+    buf_printf(b, "default: sp_raise_nomethod(sp_nomethod_msg(\"new\", sp_box_class(_t%d))); } _t%d; })",
+               kt, rt2);
     free(atmp);
     return;
   }
@@ -22995,7 +23039,29 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         free(ad.p);
         continue;
       }
-      if (argc != np || nreq != np) continue;  /* only an exact all-required match */
+      /* Same rule as the class-value emitter above: optional parameters are
+         filled from their defaults rather than making the class unreachable. */
+      if (initm < 0) { if (argc != np || nreq != np) continue; }
+      else {
+        if (argc < nreq || argc > np) continue;
+        if (argc < np && ctor_needs_self_defaults(c, initm, argc)) continue;
+      }
+      /* A parameter and its argument both concretely typed but DIFFERENT is a
+         miscompile, not a coercion: the unbox below would read the argument's
+         bits as the parameter's type. `initialize(a = 1, b = 2)` types `a` Int,
+         so `k.new("x")` on it must not select this class. The class-method
+         prearm has always applied this rule; these two emitters reached it only
+         once optional parameters made such a class a candidate at all. */
+      { int incompat = 0;
+        Scope *cs = initm >= 0 ? &c->scopes[initm] : NULL;
+        for (int a2 = 0; cs && a2 < argc && a2 < cs->nparams && !incompat; a2++) {
+          LocalVar *cp = cs->pnames && cs->pnames[a2] ? scope_local(cs, cs->pnames[a2]) : NULL;
+          TyKind ptc = cp ? cp->type : TY_POLY;
+          TyKind atc = argv ? comp_ntype(c, argv[a2]) : TY_POLY;
+          if (ptc != TY_POLY && ptc != TY_UNKNOWN && atc != TY_POLY && atc != TY_UNKNOWN &&
+              ptc != atc) incompat = 1;
+        }
+        if (incompat) continue; }
       buf_printf(b, "case %d: _t%d=", ci, rt2);
       if (c->classes[ci].is_value_type)
         buf_printf(b, "sp_box_vobj_%s(sp_%s_new(", c->classes[ci].c_name, c->classes[ci].c_name);
@@ -23006,6 +23072,7 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
         if (j) buf_puts(b, ", ");
         LocalVar *pp = is ? scope_local(is, is->pnames[j]) : NULL;
         TyKind pt = (pp && pp->type != TY_UNKNOWN) ? pp->type : TY_POLY;
+        if (j >= argc && is) { emit_arg_or_default(c, is, j, -1, b); continue; }
         char tn[24]; snprintf(tn, sizeof tn, "_t%d", atmp[j]);
         Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, pt, tn, &ub);
         buf_puts(b, ub.p ? ub.p : tn); free(ub.p);
