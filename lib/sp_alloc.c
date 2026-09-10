@@ -61,21 +61,19 @@ int sp_gc_str_budget_fixed = 0;
 /* SPINEL_GC_STR_MAJOR=fixed: hold the string old generation's gate at its floor
    instead of re-aiming it, adapting nothing. */
 int sp_gc_str_major_fixed = 0;
-/* SPINEL_GC_STR_MAJOR=interval: run the major on a SCHEDULE, with the size test
-   demoted to a backstop, the way the object heap has always run its full
-   collection. Off by default: measured against the default it is a decisive win
-   where the size gate ratchets and a real cost where it does not, and which of
-   those a program is cannot be read off the collector. See the block above
-   sp_str_major_interval. */
-int sp_gc_str_major_sched = 0;
+/* The major runs on a SCHEDULE, with the size test demoted to a backstop, the
+   way the object heap has always run its full collection. On by default;
+   SPINEL_GC_STR_MAJOR=size is the way back to the gate that shipped before it.
+   See the block above sp_str_major_interval for what it is measured to cost
+   and save. */
+int sp_gc_str_major_sched = 1;
 /* String majors run on their own gate, so the object collector's `full` count
    does not describe them: pinning that gate changed the old generation from
    57.2 MB to 11.5 MB with the reported full count identical at 6. */
 size_t sp_gc_str_majors = 0;
 size_t sp_str_old_threshold = 1024 * 1024;
 size_t sp_str_old_threshold_init = 1024 * 1024;
-/* SPINEL_GC_STR_MAJOR=interval: how many string sweeps between majors, and the
-   count that drives it. The cadence is a COUNT rather than a size because a
+/* How many string sweeps between majors, and the count that drives it. The cadence is a COUNT rather than a size because a
    size gate re-aimed from the old list is aimed at a number the same gate
    produced: a small budget promotes early, promotion is one-way until a major,
    and "twice what the last major left" then sets the next gate from what early
@@ -85,15 +83,19 @@ size_t sp_str_old_threshold_init = 1024 * 1024;
    on the heap it was missing from. The bounds are the object heap's, for the
    same reason its comment gives.
 
-   Measured (#4407) it is not a free win, which is why it is not the default.
-   On the shape the ratchet is pathological for -- a 12 MB live set under a 4 MB
-   floor -- it cut the old generation from 67.4 MB to 21.4 MB and peak RSS from
-   135 MB to 84 MB, and ran no slower. On benchmark/bm_threaded_render.rb, where
-   the ratchet earns its memory, ten order-flipped passes a side put median RSS
-   at 770 MB against 697 and wall time level, while cutting the run-to-run
-   spread from 36% to 16% and the worst case from 914 MB to 851 MB. Removing the
-   tail by raising the floor is a trade, not a fix, and which side of it a
-   program wants is not something the collector can read off the program. */
+   Measured on four shapes (#4407). On a real application at a 16 MB string
+   floor -- ONCE Campfire, measured by the reporter -- PSS went 280 to 145 MB
+   and throughput 345 to 365 req/s: the schedule went PAST the 64 MB control on
+   memory and was faster. On a 12 MB live set under a 4 MB floor it cut the old
+   generation from 67.4 MB to 21.4 MB and peak RSS from 135 MB to 84 MB, and ran
+   no slower. On the adversarial shape -- 400,000 retained strings that no major
+   can free, where a cadence firing too often would be pure cost -- there is no
+   difference at all in either wall time or RSS, because the survival ratio
+   stretches the interval to 16 and then to 128. The one cost is
+   benchmark/bm_threaded_render.rb, where twelve order-flipped passes a side put
+   median RSS at 776 MB against 736, with wall time identical (1.93s against
+   1.92s). Five percent of one benchmark's median memory, no time, against
+   halving a real application's. */
 #define SP_STR_MAJOR_INTERVAL 8
 #define SP_STR_MAJOR_INTERVAL_MAX 128
 static int sp_str_major_interval = SP_STR_MAJOR_INTERVAL;
@@ -874,7 +876,8 @@ void sp_str_sweep_end(int major, size_t promoted) {
     size_t old_after = sp_str_old_total();
     /* SPINEL_GC_STR_MAJOR=fixed holds both the backstop and the cadence where
        the floor put them, which is what makes a policy measurable against
-       itself. */
+       itself. SPINEL_GC_STR_MAJOR=size turns the schedule off entirely and
+       leaves the size test as the whole policy, which is what shipped before. */
     if (!sp_gc_str_major_fixed) {
       /* Re-baseline the backstop: twice what this major left. That formula is
          a ratchet when it is the ONLY gate and harmless behind a schedule,

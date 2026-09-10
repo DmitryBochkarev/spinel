@@ -128,18 +128,27 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_OBJ_BUDGET` | the default GATES the widening on what the last collection cost. `obj` pins it off (the object heap alone, as spinel did before 2026-09-09), `walk` pins it on (everything a mark walks). `fixed` is a separate axis: it stops re-aiming the budget after each collection and holds it at its floor |
 | `SPINEL_GC_STR_BUDGET` | `fixed` does the same for the STRING budget |
 | `SPINEL_GC_STR_MAJOR_KB` | the string OLD generation's own gate: how much old string it takes to make the next string sweep a MAJOR (default 1024). Only a major reclaims an old string |
-| `SPINEL_GC_STR_MAJOR` | `fixed` holds that gate at its floor instead of re-aiming it to twice what the last major left. `interval` replaces the gate with a SCHEDULE (a major every N string sweeps, N adapted from the survival ratio) and demotes the size test to a backstop, which is how the object heap has always run its full collection |
+| `SPINEL_GC_STR_MAJOR` | the major's policy. By default it runs on a SCHEDULE (a major every N string sweeps, N adapted from the survival ratio) with the size test demoted to a backstop, which is how the object heap has always run its full collection. `size` restores the gate that shipped before it -- a size test re-aimed to twice what the last major left. `fixed` pins both the cadence and the backstop where the floor put them |
 
-`interval` is not the default and the measurements say why. Where the size gate
-ratchets -- a live string set well above the floor, so promotion runs ahead of
-the gate -- it is a decisive win: on `test/gc_str_major_interval.rb` at a 4 MB
-floor it cut the old generation from 67.4 MB to 21.4 MB and peak RSS from
-135 MB to 84 MB, and ran no slower. On `benchmark/bm_threaded_render.rb`, where
-the ratchet earns the memory it holds, ten order-flipped passes a side put
-median RSS at 770 MB against the default's 697 with wall time level, while
-cutting the run-to-run spread from 36% to 16% and the worst case from 914 MB to
-851 MB. Removing the tail by raising the floor is a trade, and which side of it
-a program wants is not something the collector can read off the program.
+The schedule became the default on the measurements below, and `size` exists
+because a default change should carry its own way back.
+
+| shape | schedule against the size gate |
+|---|---|
+| ONCE Campfire at a 16 MB string floor (measured by the reporter, #4407) | PSS 280 -> 145 MB, throughput 345 -> 365 req/s. Past the 64 MB control on memory, and faster |
+| a 12 MB live string set under a 4 MB floor (`test/gc_str_major_interval.rb`) | old generation 67.4 -> 21.4 MB, peak RSS 135 -> 84 MB, no slower |
+| 400,000 retained strings no major can free | no difference in wall time or RSS: the survival ratio stretches the interval to 16 and then to 128, so the scheduled majors cost nothing |
+| `benchmark/bm_threaded_render.rb` | median RSS 736 -> 776 MB over twelve order-flipped passes a side, wall time 1.92 -> 1.93s |
+
+The last row is the cost: five percent of one benchmark's median memory, with
+no time, against halving a real application's. A program that wants the old
+behaviour has `SPINEL_GC_STR_MAJOR=size`.
+
+The reason the size gate ratchets at all is that it is aimed at a number it
+produces. A small budget promotes early, promotion is one-way until a major,
+and "twice what the last major left" then sets the next gate from what that
+early promotion inflated. A cadence cannot do that, and a survival RATIO is
+scale-free, so neither can the adaptation.
 
 The three `_KB` variables set where a budget STARTS; the collector re-aims it
 from what the collection found. That is right for running a program and wrong

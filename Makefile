@@ -867,11 +867,13 @@ gc-threshold-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	if [ $$ok -eq 1 ]; then echo "gc-threshold-test: pass"; else exit 1; fi
 
 # The string major has two policies and this leg asserts the difference is the
-# one the knob claims, on a shape where the default's size gate ratchets: a
-# 12 MB live string set under a 4 MB pinned floor, so promotion runs ahead of
-# the gate. Everything here is a comparison of the two arms in the SAME run of
-# the same binary on the same machine -- no absolute either arm has to hit,
-# because both numbers are set by how much this box promotes (#4407).
+# one they claim, on a shape where the SIZE gate ratchets: a 12 MB live string
+# set under a 4 MB pinned floor, so promotion runs ahead of the gate. The
+# schedule is the default and SPINEL_GC_STR_MAJOR=size is the way back, so the
+# leg also pins which of the two ships. Everything here is a comparison of the
+# two arms in the SAME run of the same binary on the same machine -- no absolute
+# either arm has to hit, because both numbers are set by how much this box
+# promotes (#4407).
 gc-str-major-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcstrmaj.XXXXXX); ok=1; \
 	src=test/gc_str_major_interval.rb; \
@@ -880,27 +882,27 @@ gc-str-major-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	run() { SPINEL_GC_STR_BUDGET=fixed SPINEL_GC_THRESHOLD_STR_KB=4096 \
 	        SPINEL_GC_PHASES=1 $(TIMEOUT60) "$$tmp/t" > "$$tmp/$$1.out" 2> "$$tmp/$$1.err"; }; \
 	run default; \
-	SPINEL_GC_STR_MAJOR=interval; export SPINEL_GC_STR_MAJOR; run interval; \
+	SPINEL_GC_STR_MAJOR=size; export SPINEL_GC_STR_MAJOR; run size; \
 	unset SPINEL_GC_STR_MAJOR; \
-	for m in default interval; do \
+	for m in default size; do \
 	  cmp -s "$$tmp/$$m.out" "$$src.expected" || \
 	    { echo "gc-str-major-test: FAIL ($$m changed the answer)"; ok=0; }; \
 	done; \
 	old_of() { sed -n 's/.*+ \([0-9.]*\) MB old .*/\1/p' "$$1" | tail -1; }; \
 	maj_of() { sed -n 's/.*old, \([0-9]*\) so far.*/\1/p' "$$1" | tail -1; }; \
-	do=$$(old_of "$$tmp/default.err"); io=$$(old_of "$$tmp/interval.err"); \
-	dm=$$(maj_of "$$tmp/default.err"); im=$$(maj_of "$$tmp/interval.err"); \
+	do=$$(old_of "$$tmp/default.err"); io=$$(old_of "$$tmp/size.err"); \
+	dm=$$(maj_of "$$tmp/default.err"); im=$$(maj_of "$$tmp/size.err"); \
 	for v in "$$do" "$$io" "$$dm" "$$im"; do \
 	  [ -n "$$v" ] || { echo "gc-str-major-test: FAIL (no [gcph] string live line)"; ok=0; break; }; \
 	done; \
-	grep -q "major at " "$$tmp/default.err" || \
-	  { echo "gc-str-major-test: FAIL (the schedule is on without the knob)"; ok=0; }; \
-	grep -q "major every .* sweeps, backstop " "$$tmp/interval.err" || \
-	  { echo "gc-str-major-test: FAIL (the knob did not select the schedule)"; ok=0; }; \
-	awk -v a="$$im" -v b="$$dm" 'BEGIN{exit !(a > b)}' || \
-	  { echo "gc-str-major-test: FAIL (the schedule did not run more majors: $$dm -> $$im)"; ok=0; }; \
-	awk -v a="$$io" -v b="$$do" 'BEGIN{exit !(a <= b)}' || \
-	  { echo "gc-str-major-test: FAIL (the schedule left MORE old behind: $$do -> $$io)"; ok=0; }; \
+	grep -q "major every .* sweeps, backstop " "$$tmp/default.err" || \
+	  { echo "gc-str-major-test: FAIL (the schedule is not the default)"; ok=0; }; \
+	grep -q "major at " "$$tmp/size.err" || \
+	  { echo "gc-str-major-test: FAIL (=size did not restore the size gate)"; ok=0; }; \
+	awk -v a="$$dm" -v b="$$im" 'BEGIN{exit !(a > b)}' || \
+	  { echo "gc-str-major-test: FAIL (the schedule did not run more majors: $$im -> $$dm)"; ok=0; }; \
+	awk -v a="$$do" -v b="$$io" 'BEGIN{exit !(a <= b)}' || \
+	  { echo "gc-str-major-test: FAIL (the schedule left MORE old behind: $$io -> $$do)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-str-major-test: pass"; else exit 1; fi
 
