@@ -241,6 +241,7 @@ static void usage(void) {
     "       spinel app.rb -o myapp     - compile to ./myapp\n"
     "       spinel app.rb -c           - generate app.c only\n"
     "       spinel app.rb -S           - print C to stdout\n"
+    "       spinel app.rb --print-cc   - print the cc command, compile nothing\n"
     "       spinel -e 'puts 42'        - compile inline source\n"
     "       spinel -E app.rb a b c     - compile + run with ARGV=[a, b, c]\n\n"
     "Options:\n"
@@ -284,6 +285,7 @@ int main(int argc, char **argv) {
   const char *int_overflow = "raise";
   const char *rbs_dir = NULL;
   int c_only = 0, stdout_mode = 0, run_mode = 0, dump_ast = 0;
+  int print_cc = 0;   /* --print-cc: emit the cc command line, run nothing */
   int emit_rbs = 0, emit_types = 0, emit_symbol_map = 0;
   int debug = 0, line_map = 1, want_g = 0, profile = 0;
   /* Accumulated -e source and the program ARGV after the -E boundary. */
@@ -344,6 +346,7 @@ int main(int argc, char **argv) {
     else if (sp_streq(a, "-I"))            { if (++i < argc) sp_add_feature_root(argv[i]); i++; }
     else if (!strncmp(a, "-I", 2) && a[2]) { sp_add_feature_root(a + 2); i++; }
     else if (sp_streq(a, "-S"))            { stdout_mode = 1; i++; }
+    else if (sp_streq(a, "--print-cc"))    { print_cc = 1; i++; }
     else if (sp_streq(a, "-E"))            { run_mode = 1; i++; }
     else if (sp_streq(a, "--emit-rbs"))    { emit_rbs = 1; i++; }
     else if (sp_streq(a, "--emit-types"))  { emit_types = 1; i++; }
@@ -840,6 +843,12 @@ int main(int argc, char **argv) {
   free(ffi_links.p);
   free(ffi_cflags.p);
 
+  /* `--print-cc`: say what would be run instead of running it. The point is
+     that a build recipe generated elsewhere -- `spin pack`'s Makefile -- is
+     derived from THIS line rather than from a second copy of the same
+     knowledge. A copy drifts, and a drifted copy breaks only on the machine
+     the pack was sent to, which is the least diagnosable place for it. */
+  if (print_cc) { printf("%s\n", cmd.p); free(cmd.p); return 0; }
   int cc_rc = system(cmd.p);
   free(cmd.p);
   if (cc_rc != 0) {

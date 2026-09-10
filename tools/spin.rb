@@ -1328,6 +1328,187 @@ end
 EMIT_ONLY_FLAGS = ["-c", "-S", "--emit-rbs", "--emit-types",
                    "--emit-symbol-map", "--dump-ast"]
 
+# Split a command line the way a shell would, honouring double quotes. The
+# compiler quotes the paths it emits (they can contain spaces) and nothing
+# else, so this is the whole grammar that has to be understood.
+def pack_split(line)
+  out = []
+  cur = ""
+  q = false
+  i = 0
+  while i < line.length
+    ch = line[i, 1]
+    if ch == "\""
+      q = !q
+    elsif ch == " " && !q
+      out << cur if cur != ""
+      cur = ""
+    else
+      cur += ch
+    end
+    i += 1
+  end
+  out << cur if cur != ""
+  out
+end
+
+def pack_copy(src, dst)
+  File.write(dst, File.read(src))
+end
+
+def pack_mkdir(d)
+  Dir.mkdir(d) unless Dir.exist?(d)
+end
+
+# `spin pack`: a directory that builds the program from C alone -- no spinel,
+# no spin, a C compiler and make.
+#
+# The recipe is DERIVED rather than written. `spinel --print-cc` says the
+# command it would run, and the Makefile below is that command with its paths
+# rewritten to the pack's own. A second copy of the build knowledge would
+# drift, and a drifted copy breaks only on the machine the pack was sent to,
+# which is the least diagnosable place for it to break.
+#
+# The runtime ships as SOURCE, not as the .a. That is not thoroughness: the
+# generated C includes the runtime headers, and 270 of the runtime's functions
+# are `static inline` in them, so the recipient compiles 16,765 lines of
+# runtime either way. Shipping the .a would save the .c files and cost the
+# thing the pack is for -- an archive is built for one platform and one set of
+# defines (SP_THREADS above all), and a mismatched one links and then misbehaves
+# at run time, because the generated TU writes its own externs and nothing
+# cross-checks them.
+def cmd_pack(prj, targets, outdir)
+  bins = prj.bins
+  spin_die("no bin/*.rb executables to pack") if bins.empty?
+  targets = bins if targets.empty?
+  spin_die("pack takes one executable at a time; got #{targets.length}") if targets.length > 1
+  name = targets[0]
+  spin_die("no such executable: bin/#{name}.rb") unless bins.include?(name)
+  entry = File.join(prj.root, "bin", name + ".rb")
+
+  outdir = File.join(prj.root, "build", "pack", name) if outdir == ""
+  system("rm -rf #{outdir}")
+  pack_mkdir(File.join(prj.root, "build"))
+  pack_mkdir(File.join(prj.root, "build", "pack"))
+  # the requested --out may be anywhere; make its parents the cheap way
+  system("mkdir -p #{outdir}")
+  pack_mkdir(File.join(outdir, "src"))
+  pack_mkdir(File.join(outdir, "lib"))
+  pack_mkdir(File.join(outdir, "lib", "regexp"))
+  pack_mkdir(File.join(outdir, "native"))
+
+  flags = spin_flags(prj)
+  cfile = File.join(outdir, "src", name + ".c")
+  unless system("#{spinel_bin} #{entry} #{flags} -c --force -o #{cfile}")
+    spin_die("pack: the compiler could not translate bin/#{name}.rb")
+  end
+
+  tmp = ENV["TMPDIR"].to_s
+  tmp = "/tmp" if tmp == ""
+  ccf = File.join(tmp, "spin-pack-#{Process.pid}.cc")
+  unless system("#{spinel_bin} #{entry} #{flags} --print-cc -o #{name} > #{ccf}")
+    spin_die("pack: the compiler could not report its build command")
+  end
+  line = File.read(ccf).strip
+  system("rm -f #{ccf}")
+
+  # The runtime, from the tree the compiler itself lives in.
+  rt = File.join(File.expand_path("..", File.expand_path("..", spinel_bin)), "lib")
+  Dir.glob(File.join(rt, "*.c")).each { |f| pack_copy(f, File.join(outdir, "lib", File.basename(f))) }
+  Dir.glob(File.join(rt, "*.h")).each { |f| pack_copy(f, File.join(outdir, "lib", File.basename(f))) }
+  Dir.glob(File.join(rt, "regexp", "*.c")).each { |f| pack_copy(f, File.join(outdir, "lib", "regexp", File.basename(f))) }
+  Dir.glob(File.join(rt, "regexp", "*.h")).each { |f| pack_copy(f, File.join(outdir, "lib", "regexp", File.basename(f))) }
+  # lib/spinel/ is the ABI a native package compiles against -- it includes
+  # <spinel/runtime.h> by that path, so the directory has to keep its name.
+  if Dir.exist?(File.join(rt, "spinel"))
+    pack_mkdir(File.join(outdir, "lib", "spinel"))
+    Dir.glob(File.join(rt, "spinel", "*.h")).each do |f|
+      pack_copy(f, File.join(outdir, "lib", "spinel", File.basename(f)))
+    end
+  end
+
+  # Read the command apart. Everything that is not a path we rewrite, a
+  # library, or the output name is a compile flag, and the runtime sources get
+  # the same ones -- which is the second reason to derive from this line rather
+  # than compose it: -DSP_THREADS has to reach the runtime too, and here it
+  # cannot be forgotten.
+  cflags = ""
+  libs = ""
+  natives = ""
+  toks = pack_split(line)
+  cc = toks.empty? ? "cc" : toks[0]
+  i = 1
+  while i < toks.length
+    t = toks[i]
+    if t == "-o"
+      i += 2
+      next
+    elsif t.length > 2 && t[0, 2] == "-I"
+      # every -I pointed into the compiler's tree; the pack has its own
+    elsif t.length > 2 && t[0, 2] == "-l"
+      libs += " " + t
+    elsif t.length > 4 && t[0, 4] == "-Wl,"
+      libs += " " + t
+    elsif t.length > 2 && t[t.length - 2, 2] == ".c"
+      # the generated TU: it is src/<name>.c here
+    elsif t.length > 2 && t[t.length - 2, 2] == ".a"
+      # the runtime archive: this pack builds it from source instead
+    elsif t.length > 2 && t[t.length - 2, 2] == ".o"
+      # a package's native object. Its SOURCE is what travels; the object was
+      # built for the packer's platform and the pack exists to leave that
+      # behind. A `_mt` object is the threaded variant of one source file.
+      base = File.basename(t)
+      stem = base[0, base.length - 2]
+      stem = stem[0, stem.length - 3] if stem.length > 3 && stem[stem.length - 3, 3] == "_mt"
+      src = File.join(File.dirname(t), stem + ".c")
+      if File.exist?(src)
+        pack_copy(src, File.join(outdir, "native", stem + ".c"))
+        natives += " native/" + stem + ".o"
+        Dir.glob(File.join(File.dirname(t), "*.h")).each do |hf|
+          pack_copy(hf, File.join(outdir, "native", File.basename(hf)))
+        end
+      else
+        puts "pack: warning: no source beside #{base}; the pack will not build without it"
+      end
+    else
+      cflags += " " + t
+    end
+    i += 1
+  end
+
+  mk = "# Generated by `spin pack`. Builds #{name} from C alone: a C compiler
+"        "# and make, no spinel and no spin. Parallel-safe (`make -j`).
+"        "#
+"        "# The flags below are the ones the compiler reported it would use for
+"        "# this program (`spinel --print-cc`), so they are not a second opinion
+"        "# about how to build it. The runtime sources take the same flags: a
+"        "# threaded program compiles its runtime with -DSP_THREADS too, and the
+"        "# generated TU writes its own externs, so a mismatch there links and
+"        "# then misbehaves rather than failing.
+"        "CC ?= #{cc}
+"        "CFLAGS ?=#{cflags} -Ilib -Ilib/regexp
+"        "LIBS ?=#{libs}
+"        "
+"        "RT := $(wildcard lib/*.c) $(wildcard lib/regexp/*.c)
+"        "NATIVE :=#{natives}
+"        "OBJS := src/#{name}.o $(RT:.c=.o) $(NATIVE)
+"        "
+"        "#{name}: $(OBJS)
+"        "\t$(CC) $(CFLAGS) $(OBJS) $(LIBS) -o $@
+"        "
+"        "%.o: %.c
+"        "\t$(CC) $(CFLAGS) -c $< -o $@
+"        "
+"        "clean:
+"        "\trm -f $(OBJS) #{name}
+"        "
+"        ".PHONY: clean
+"
+  File.write(File.join(outdir, "Makefile"), mk.gsub("\t", "	"))
+  puts "pack #{name} -> #{outdir}"
+  puts "  cd #{outdir} && make -j"
+end
+
 def cmd_build(prj, targets, extra)
   extra.split(" ").each do |a|
     if EMIT_ONLY_FLAGS.include?(a)
@@ -2170,6 +2351,22 @@ when "flags"
   else
     puts spin_flags(Project.new(root))
   end
+when "pack"
+  root = find_root(Dir.pwd)
+  spin_die("no spin.toml found") if root == ""
+  outdir = ""
+  tg = []
+  i = 0
+  while i < rest.length
+    if rest[i] == "--out"
+      outdir = i + 1 < rest.length ? File.expand_path(rest[i + 1]) : ""
+      i += 1
+    else
+      tg << rest[i]
+    end
+    i += 1
+  end
+  cmd_pack(Project.new(root), tg, outdir)
 when "search"
   cmd_search(rest.empty? ? "" : rest[0])
 when "install"

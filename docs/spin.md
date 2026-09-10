@@ -399,6 +399,43 @@ resolves against any `-I` root as `<root>/curses.rb` or
 at `spin/packages/curses/`, and `--link` takes its compiled object. `spin
 flags` is the part that works out which roots and which objects.
 
+## Shipping a build that does not need spinel
+
+`spin pack` writes a directory that builds the program from C alone: a C
+compiler and `make`, no spinel and no spin.
+
+```
+$ spin pack
+pack demo -> /path/to/demo/build/pack/demo
+  cd /path/to/demo/build/pack/demo && make -j
+```
+
+It contains the generated C, the runtime sources, the sources of every native
+package the build links, and a Makefile. `--out DIR` puts it somewhere else.
+One executable at a time; name it when the project has several.
+
+**The Makefile is derived, not written.** `spinel --print-cc` reports the
+command the compiler would have run, and the Makefile is that command with its
+paths rewritten to the pack's own. A second copy of the build knowledge would
+drift from the first, and a drifted copy breaks only on the machine the pack
+was sent to, which is the least diagnosable place for it. The same flags reach
+the runtime sources for the same reason: a threaded program needs
+`-DSP_THREADS` when compiling the runtime as much as when compiling its own
+translation unit, and the generated code writes its own `extern`s, so a
+mismatch there links and then misbehaves rather than failing.
+
+**The runtime travels as source, not as `libspinel_rt.a`.** That is not
+thoroughness. The generated C includes the runtime headers and around 270 of
+the runtime's functions are `static inline` in them, so the recipient compiles
+some 17,000 lines of runtime whichever way it is shipped; the archive would
+save the `.c` files and cost the thing the pack is for. An archive is built for
+one platform and one set of defines, and a mismatched one is the failure
+described above.
+
+**What a pack cannot carry.** A package that binds a system library -- openssl,
+sqlite -- names it with `-l` in the Makefile and expects it on the recipient's
+machine. Those packs need a C compiler, `make`, and that library.
+
 ## Rebuilds
 
 `spin build`/`run`/`test` skip recompilation when nothing changed (input
@@ -418,6 +455,7 @@ objects are reused from the cache. `spin clean` removes `build/`.
 | `spin add` / `remove` | edit `[dependencies]` and relock |
 | `spin lock` / `fetch` / `vendor` | pin / warm the cache / copy into `vendor/` |
 | `spin flags` | print the compiler flags this project implies, for a build driven from outside spin |
+| `spin pack` | write a directory that builds the program from C alone: a C compiler and make, no spinel |
 | `spin list` / `tree` / `search` (`--json`) | inspect the resolved set / the index |
 | `spin publish [--direct]` | validate + test, then submit this release to the index |
 | `spin install [name..]` | build and copy `bin/` executables to `~/.local/bin` (`--prefix`, `--uninstall`) |
