@@ -13,9 +13,10 @@
 # each has its own arm ahead of that test, which is why they survived the same
 # shadow and made this identifiable.
 #
-# Still open, deliberately not pinned here: an INSTANTIATED class of the same
-# name keeps the builtin away, and the String receiver still raises. That wants
-# a String arm in the dispatch, which is a larger change.
+# The second half is an INSTANTIATED class of the same name. Reachability
+# cannot help there -- the user method really is callable -- so the dispatch
+# itself gets a String pre-arm, the way `include?`, `delete` and the multi-set
+# forms already have one. Both receivers then answer their own method.
 class Bucket
   def partition(&blk); [[], []]; end
   def rpartition(&blk); [[], []]; end
@@ -33,3 +34,18 @@ puts "rpartition #{a}|#{sep}|#{b}"
 puts "split #{h["p"].split("?").inspect}"
 puts "upcase #{h["p"].upcase}"
 puts "strip #{h["p"].strip}"
+
+# --- the instantiated half: the user method is genuinely callable ---
+
+class Bin
+  def partition(&blk); [[1], [2]]; end
+  def rpartition(&blk); [[3], [4]]; end
+end
+
+bin = Bin.new
+puts "user partition #{bin.partition { |x| x }.inspect}"
+puts "user rpartition #{bin.rpartition { |x| x }.inspect}"
+a, sep, b = h["p"].partition("?")
+puts "string beside it #{a}|#{sep}|#{b}"
+a, sep, b = h["p"].rpartition("?")
+puts "string beside it r #{a}|#{sep}|#{b}"

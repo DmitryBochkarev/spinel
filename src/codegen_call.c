@@ -5528,6 +5528,15 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
        `data[offset, 8].delete("\x00").upcase` WAD name fields). */
     int is_strdel = sp_streq(name, "delete") && argc == 1 &&
                     infer_type(c, argv[0]) == TY_STRING;
+    /* partition / rpartition on a TAG_STR receiver. They have no poly arm of
+       their own ahead of the name-collision test -- which is why `split`,
+       `upcase` and `strip` survived a same-named user method and these did
+       not -- so a genuine String fell to the switch's raising default and
+       answered NoMethodError, naming String, for a method String has
+       (#4413). A class nothing instantiates no longer takes the name away;
+       this is the same hole for one that IS instantiated. */
+    int is_strpart = (sp_streq(name, "partition") || sp_streq(name, "rpartition")) &&
+                     argc == 1 && infer_type(c, argv[0]) == TY_STRING;
     /* The multi-set forms of count/delete/squeeze (String's alone) when a
        user class also owns the name: the switch needs a TAG_STR pre-arm or
        a genuine String receiver falls to its NoMethodError default, the
@@ -5778,6 +5787,17 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         buf_printf(b, "if (_t%d.tag == SP_TAG_STR) { _t%d = ", tv, tr);
         if (ret == TY_POLY) buf_printf(b, "sp_box_str(sp_str_delete(_t%d.v.s, _t%d))", tv, atmp[0]);
         else buf_printf(b, "sp_str_delete(_t%d.v.s, _t%d)", tv, atmp[0]);
+        buf_puts(b, "; }\nelse ");
+      }
+      /* partition / rpartition on a TAG_STR receiver: sp_str_partition answers
+         the sp_StrArray CRuby's three-element result is, boxed when a user arm
+         widened the dispatch's result to poly. */
+      if (is_strpart && (ret == TY_POLY || ret == TY_STR_ARRAY)) {
+        buf_printf(b, "if (_t%d.tag == SP_TAG_STR) { _t%d = ", tv, tr);
+        if (ret == TY_POLY)
+          buf_printf(b, "sp_box_str_array(sp_str_%s(_t%d.v.s, _t%d))", name, tv, atmp[0]);
+        else
+          buf_printf(b, "sp_str_%s(_t%d.v.s, _t%d)", name, tv, atmp[0]);
         buf_puts(b, "; }\nelse ");
       }
       /* the multi-set forms on a TAG_STR receiver (#4195) */
