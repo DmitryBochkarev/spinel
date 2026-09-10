@@ -99,6 +99,23 @@ size_t sp_str_old_threshold_init = 1024 * 1024;
 static int sp_str_major_interval = SP_STR_MAJOR_INTERVAL;
 static unsigned sp_str_sweep_cycle = 0;
 static int sp_str_major_forced = 0;
+/* The old generation's size at every string sweep, so the run can be described
+   by its shape rather than by whichever instant a per-second line happened to
+   catch. rubys' reading on #4407 is that the ratio of the MEDIAN to the MINIMUM
+   says whether the gate is holding garbage: the minimum is about what a major
+   can actually leave, so the ratio is how far above that the gate keeps the
+   heap. It could not be checked on a two-second benchmark, because the [gcph]
+   line prints once a second and a median of three samples is not a median.
+   Sampling at the sweep removes that limit: the cadence becomes the
+   collector's, not the clock's. A ring, so a long run costs no more than a
+   short one and the samples are the most recent SP_STR_SHAPE_MAX. */
+#define SP_STR_SHAPE_MAX 8192
+static size_t sp_str_shape[SP_STR_SHAPE_MAX];
+static unsigned sp_str_shape_n = 0;      /* total sweeps seen */
+static int sp_str_shape_cmp(const void *a, const void *b) {
+  size_t x = *(const size_t *)a, y = *(const size_t *)b;
+  return x < y ? -1 : (x > y ? 1 : 0);
+}
 /* The [gcph] line names whichever policy is running, so the number after it is
    never read as the other one's: the default's is a size to cross, the
    schedule's is a cadence with the size demoted to a backstop. */
@@ -350,6 +367,23 @@ static void sp_gc_stats_emit(void) {
           sp_str_major_label(),
           (double)sp_str_old_threshold / 1048576.0,
           (unsigned long long)sp_gc_str_majors);
+  /* median / min over the sweeps, and their ratio. One number for the sawtooth
+     the per-second line can only show a slice of. */
+  if (sp_str_shape_n > 0) {
+    unsigned n = sp_str_shape_n < SP_STR_SHAPE_MAX ? sp_str_shape_n : SP_STR_SHAPE_MAX;
+    size_t *cp = (size_t *)malloc((size_t)n * sizeof *cp);
+    if (cp) {
+      memcpy(cp, sp_str_shape, (size_t)n * sizeof *cp);
+      qsort(cp, n, sizeof *cp, sp_str_shape_cmp);
+      double med = (double)cp[n / 2], mn = (double)cp[0];
+      fprintf(stderr,
+              "[gcph] string old over %u sweeps: min %.1f MB  median %.1f MB  max %.1f MB"
+              "  (median/min %.1fx)\n",
+              n, mn / 1048576.0, med / 1048576.0, (double)cp[n - 1] / 1048576.0,
+              mn > 0 ? med / mn : 0.0);
+      free(cp);
+    }
+  }
   fprintf(stderr,
           "[gcph] marked %llu objs  swept %llu slots\n",
           (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_marked), (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_swept));
@@ -808,6 +842,13 @@ int sp_str_sweep_begin(int *major) {
   if (before <= SP_GC_CTR_GET(sp_str_threshold)) return 0;
   sp_str_gate_before = before;
   sp_str_gate_old = sp_str_old_total();
+  /* Only once a major has run: before that the minimum is the empty heap, not
+     "what a major can leave", and a min of zero makes the ratio meaningless
+     (it reads 0.0x rather than large). */
+  if (sp_gc_str_majors > 0) {
+    sp_str_shape[sp_str_shape_n % SP_STR_SHAPE_MAX] = sp_str_gate_old;
+    sp_str_shape_n++;
+  }
   /* Walk the old generation only once it has itself grown past a threshold,
      then re-aim that threshold at what survived. Between majors, old strings
      that die are reclaimed late -- the same delayed-reclamation trade this
