@@ -1361,31 +1361,50 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
       sp_streq(name, "find") || sp_streq(name, "detect"))
     return 0;
   int trecv = ++g_tmp;
-  emit_indent(b, indent);
-  buf_printf(b, "sp_RbVal _t%d = ", trecv); emit_boxed(c, recv, b); buf_puts(b, ";\n");
-  emit_indent(b, indent);
-  buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d);\n", trecv);
-  emit_indent(b, indent);
-  buf_printf(b, "switch (_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff) {\n", trecv, trecv);
+  /* Build the whole switch into a scratch buffer first. `emit_inline_call`
+     can DECLINE an arm -- a candidate that consumes its block through a
+     declared `&blk` rather than `yield` is not an inlining target: it has a
+     standalone C function instead, which is the point of that spelling. Its
+     return value was discarded here, so the arm was opened and nothing was
+     put in it (`case 29: { break; }`) and the call silently disappeared: a
+     poly-receiver `Net::HTTP#request` with a block did exactly this, and so
+     does any mix where one candidate yields and another declares `&blk`.
+     Nothing is written to `b` until every arm has emitted a body; if one
+     declines, discard the lot and return 0 so the ordinary poly dispatch
+     emits the call and threads the block, the way it already does for a
+     typed receiver. Same policy as the |x| gate above: hand it to a path
+     that emits something, never leave a silent empty body. */
+  Buf sw; memset(&sw, 0, sizeof sw);
+  emit_indent(&sw, indent);
+  buf_printf(&sw, "sp_RbVal _t%d = ", trecv); emit_boxed(c, recv, &sw); buf_puts(&sw, ";\n");
+  emit_indent(&sw, indent);
+  buf_printf(&sw, "SP_GC_ROOT_RBVAL(_t%d);\n", trecv);
+  emit_indent(&sw, indent);
+  buf_printf(&sw, "switch (_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff) {\n", trecv, trecv);
   const char *sv_expr = g_inline_recv_expr;
   int sv_class = g_inline_recv_class;
   TyKind sv_cache = c->ntype[recv];
   for (int i = 0; i < nc; i++) {
     int k = cand[i];
-    emit_indent(b, indent);
-    buf_printf(b, "case %d: {\n", k);
+    emit_indent(&sw, indent);
+    buf_printf(&sw, "case %d: {\n", k);
     char castbuf[96];
     snprintf(castbuf, sizeof castbuf, "(sp_%s *)_t%d.v.p", c->classes[k].c_name, trecv);
     g_inline_recv_expr = castbuf;
     g_inline_recv_class = k;
     c->ntype[recv] = ty_object(k);  /* so the inline entry classifies the receiver */
-    emit_inline_call(c, id, b, indent + 1);
+    size_t before = sw.len;
+    int armed = emit_inline_call(c, id, &sw, indent + 1);
+    int empty = !armed || sw.len == before;
     g_inline_recv_expr = sv_expr;
     g_inline_recv_class = sv_class;
     c->ntype[recv] = sv_cache;
-    emit_indent(b, indent + 1); buf_puts(b, "break;\n");
-    emit_indent(b, indent); buf_puts(b, "}\n");
+    if (empty) { free(sw.p); return 0; }
+    emit_indent(&sw, indent + 1); buf_puts(&sw, "break;\n");
+    emit_indent(&sw, indent); buf_puts(&sw, "}\n");
   }
+  Buf *b_sv = b; b = &sw;
+  int emitted_default = 0;
   /* map!/collect!: the poly value can also be a BUILTIN array at run time
      (a nested-array element) -- without this default arm the switch missed
      it silently and the mutation vanished (#3234). Rewrite in place over the
@@ -1424,9 +1443,24 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "sp_poly_arr_writeback(_t%d, _t%d);\n", trecv, tw);
       emit_indent(b, indent + 1); buf_puts(b, "break;\n");
       emit_indent(b, indent); buf_puts(b, "}\n");
+      emitted_default = 1;
     }
   }
+  /* Every other poly dispatch closes with a raising default; this one closed
+     with nothing, so a runtime class outside the candidate set fell through
+     the switch and the call silently did nothing -- CRuby raises NoMethodError
+     there. The candidate set is the INSTANTIATED user classes that define the
+     name, so an instance of a class that does not is exactly the case: real,
+     and previously silent. (#3234 is the same hole in this switch, found from
+     the builtin-array side and patched only for map!/collect!.) */
+  if (!emitted_default) {
+    emit_indent(b, indent); buf_puts(b, "default: ");
+    buf_printf(b, "sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;\n", name, trecv);
+  }
   emit_indent(b, indent); buf_puts(b, "}\n");
+  b = b_sv;
+  if (sw.p) buf_puts(b, sw.p);
+  free(sw.p);
   return 1;
 }
 
