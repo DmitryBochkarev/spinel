@@ -368,6 +368,18 @@ int ty_block_yield(TyKind recv, const char *name, TyKind *out, int max) {
     }
     if (sp_streq(name, "each_key")) { BY_PUT(0, ty_hash_key(recv)); return 1; }
     if (sp_streq(name, "each_value")) { BY_PUT(0, ty_hash_val(recv)); return 1; }
+    /* Every other element iterator hands a Hash's block the same [k, v] pair
+       `each` does -- that is what Enumerable is, and Hash gets these names from
+       it. Reporting 0 for them did not mean "no block": this oracle's one
+       caller is the forwarded-callable desugar, which reads 0 as "not a
+       context-free iterator" and declines. Declining left `h.map(&f)` in its
+       &-form with no emitter to claim it, and the call became a NoMethodError
+       raised at run time by a program that compiled. The 1-param and 2-param
+       callable cases are then separated by the wrap_pair rule at the call site,
+       which already existed for `each` and needs nothing new. */
+    if (ty_is_array_elem_iter(name)) {
+      BY_PUT(0, ty_hash_key(recv)); BY_PUT(1, ty_hash_val(recv)); return 2;
+    }
     return 0;
   }
   if (recv == TY_RANGE) {
