@@ -1253,6 +1253,12 @@ rbs-seed-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 	  "$$tmp/mu" > "$$tmp/mu.out" 2>/dev/null; \
 	  cmp -s "$$tmp/mu.out" test/rbs-seed/map_untyped_poly.expected || { echo "rbs-seed-test: FAIL (untyped map-into-poly output mismatch)"; diff -u test/rbs-seed/map_untyped_poly.expected "$$tmp/mu.out" || true; ok=0; }; \
 	else echo "rbs-seed-test: FAIL (untyped map result boxed as sp_box_int: C did not compile)"; ok=0; fi; \
+	$(SPINEL) test/rbs-seed/nilable_elem_array_return.rb --rbs test/rbs-seed/sig \
+	  -c --no-line-map -o "$$tmp/nea.c" 2>/dev/null; \
+	if $(CC) -O0 -Ilib $(RBS_SEED_STRICT) "$$tmp/nea.c" $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/nea" 2>"$$tmp/nea.err"; then \
+	  "$$tmp/nea" > "$$tmp/nea.out" 2>/dev/null; \
+	  cmp -s "$$tmp/nea.out" test/rbs-seed/nilable_elem_array_return.expected || { echo "rbs-seed-test: FAIL (an Array[Integer] seed CAST a poly array whose element inferred Integer?)"; diff -u test/rbs-seed/nilable_elem_array_return.expected "$$tmp/nea.out" || true; ok=0; }; \
+	else echo "rbs-seed-test: FAIL (nilable_elem_array_return C did not compile)"; ok=0; fi; \
 	$(SPINEL) test/rbs-seed/int_grows_bignum.rb --rbs test/rbs-seed/sig \
 	  -c --no-line-map -o "$$tmp/ig.c" 2>/dev/null; \
 	if $(CC) -O0 -Ilib $(RBS_SEED_STRICT) "$$tmp/ig.c" $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/ig" 2>"$$tmp/ig.err"; then \

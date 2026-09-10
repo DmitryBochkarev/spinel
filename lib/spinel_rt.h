@@ -6835,6 +6835,48 @@ static sp_PolyPolyHash *sp_poly_as_poly_poly_hash(sp_RbVal v) {
   return sp_PolyPolyHash_from_poly(v);
 }
 
+/* A boxed array entering a slot of a CONCRETE element kind. Exactly the defect
+   the hash variants above had, and it outlived the fix for them: the kinds are
+   separate C structs, so the pointer cast that served here read a PolyArray's
+   header as an IntArray's and the caller printed memory rather than elements.
+   Reachable through an --rbs seed -- `-> Array[Integer]` on a body whose
+   element inferred `Integer?` -- where the seed's tag assertion passes, because
+   the value IS an Array, and only the ELEMENT kind differs (#4424).
+   A matching kind is still the pointer itself, so an array that is already
+   right keeps its identity and its mutations; only a mismatch pays for a
+   rebuild. A nil element takes the slot's own nil, which is what a nullable
+   int or float becomes everywhere else it meets a concrete slot. */
+static sp_IntArray *sp_poly_as_int_array(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_INT_ARRAY) return (sp_IntArray *)v.v.p;
+  if (v.tag == SP_TAG_NIL || !sp_poly_is_array_kind(v.cls_id)) return (sp_IntArray *)0;
+  sp_IntArray *a = sp_IntArray_new(); SP_GC_ROOT(a);
+  sp_int n = sp_poly_length(v);
+  for (sp_int i = 0; i < n; i++) sp_IntArray_push(a, sp_poly_as_int_or_nil(sp_poly_arr_get(v, i)));
+  return a;
+}
+static sp_FloatArray *sp_poly_as_float_array(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLT_ARRAY) return (sp_FloatArray *)v.v.p;
+  if (v.tag == SP_TAG_NIL || !sp_poly_is_array_kind(v.cls_id)) return (sp_FloatArray *)0;
+  sp_FloatArray *a = sp_FloatArray_new(); SP_GC_ROOT(a);
+  sp_int n = sp_poly_length(v);
+  for (sp_int i = 0; i < n; i++) {
+    sp_RbVal e = sp_poly_arr_get(v, i);
+    sp_FloatArray_push(a, e.tag == SP_TAG_INT ? (sp_float)e.v.i : sp_poly_as_float_or_nil(e));
+  }
+  return a;
+}
+static sp_StrArray *sp_poly_as_str_array(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_ARRAY) return (sp_StrArray *)v.v.p;
+  if (v.tag == SP_TAG_NIL || !sp_poly_is_array_kind(v.cls_id)) return (sp_StrArray *)0;
+  sp_StrArray *a = sp_StrArray_new(); SP_GC_ROOT(a);
+  sp_int n = sp_poly_length(v);
+  for (sp_int i = 0; i < n; i++) {
+    sp_RbVal e = sp_poly_arr_get(v, i);
+    sp_StrArray_push(a, e.tag == SP_TAG_NIL ? (const char *)0 : e.v.s);
+  }
+  return a;
+}
+
 /* poly_arr_get/set for PolyPolyHash with integer index key. */
 /* multi-assign element read: `a, b = v` destructures only when the boxed
    value is an Array (Ruby's to_ary semantics); any other runtime kind is a

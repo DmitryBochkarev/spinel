@@ -173,6 +173,13 @@ void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
      read through a pointer cast keeps its keys and reads its values as another
      type's zero -- silently (#3998). Go through the converting entry, which
      hands back the pointer itself when the variant already matches. */
+  /* The array kinds are separate C structs too, and had no converting entry:
+     a boxed PolyArray read through the pointer cast below became an IntArray's
+     header, and the caller printed memory. Same rule as the hash variants
+     below it, arriving late (#4424). */
+  if (t == TY_INT_ARRAY)   { buf_printf(b, "sp_poly_as_int_array(%s)", expr); return; }
+  if (t == TY_FLOAT_ARRAY) { buf_printf(b, "sp_poly_as_float_array(%s)", expr); return; }
+  if (t == TY_STR_ARRAY)   { buf_printf(b, "sp_poly_as_str_array(%s)", expr); return; }
   if (t == TY_STR_POLY_HASH)  { buf_printf(b, "sp_poly_as_str_poly_hash(%s)", expr); return; }
   if (t == TY_SYM_POLY_HASH)  { buf_printf(b, "sp_poly_as_sym_poly_hash(%s)", expr); return; }
   if (t == TY_POLY_POLY_HASH) { buf_printf(b, "sp_poly_as_poly_poly_hash(%s)", expr); return; }
