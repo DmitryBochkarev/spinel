@@ -1718,8 +1718,26 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
     din = g_indent + 1;
     emit_indent(g_pre, din); emit_ctype(c, et, g_pre);
     buf_printf(g_pre, " lv_%s = _t%d;\n", p0, tr);
+    if (!(g_cap_struct && g_cap_names && nameset_has(g_cap_names, p0)))
+      emit_cell_shadow_store(c, tsc, p0, g_pre, din);
   }
-  else if (p0) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tr); }
+  else if (p0) {
+    emit_indent(g_pre, g_indent); buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tr);
+    /* The block's parameter may be CELLED -- something inside the body needs it
+       as a proc's capture, which here means a dispatch arm that hands the inner
+       block over as a proc rather than splicing it. The arms that DO splice read
+       the cell, and nothing had written it: the binding above fills the plain
+       slot only, so the cell kept its NULL and `body << chunk` dereferenced it
+       (#4418, SIGSEGV; a String receiver made it a nil instead). The publish
+       belongs at the binding, which is the one point every arm passes through --
+       the capture fill, where it used to be, is only reached when a proc is
+       actually built. */
+    /* Inlined inside a real proc function the cell is reachable only through
+       the capture struct and is not this frame's to name, which is the guard
+       the loop emitters carry for the same publish. */
+    if (!(g_cap_struct && g_cap_names && nameset_has(g_cap_names, p0)))
+      emit_cell_shadow_store(c, tsc, p0, g_pre, g_indent);
+  }
 
   int sv = g_indent; g_indent = din;
   if (is_then) {
