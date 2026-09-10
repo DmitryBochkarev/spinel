@@ -127,6 +127,8 @@ These are deliberate consequences of real parallelism, listed in
 | `SPINEL_GC_THRESHOLD_STR_KB` | the same for the STRING heap alone |
 | `SPINEL_GC_OBJ_BUDGET` | the default GATES the widening on what the last collection cost. `obj` pins it off (the object heap alone, as spinel did before 2026-09-09), `walk` pins it on (everything a mark walks). `fixed` is a separate axis: it stops re-aiming the budget after each collection and holds it at its floor |
 | `SPINEL_GC_STR_BUDGET` | `fixed` does the same for the STRING budget |
+| `SPINEL_GC_STR_MAJOR_KB` | the string OLD generation's own gate: how much old string it takes to make the next string sweep a MAJOR (default 1024). Only a major reclaims an old string |
+| `SPINEL_GC_STR_MAJOR` | `fixed` holds that gate at its floor instead of re-aiming it to twice what the last major left |
 
 The three `_KB` variables set where a budget STARTS; the collector re-aims it
 from what the collection found. That is right for running a program and wrong

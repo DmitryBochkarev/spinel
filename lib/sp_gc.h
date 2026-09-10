@@ -134,6 +134,8 @@ extern int sp_gc_minor_on;   /* read by sp_gc_wb below; set once before main */
    sp_gc_retune_object, which is where the reasoning lives. */
 extern int sp_gc_obj_budget_mode;   /* 0 obj, 1 walk, 2 gated (default) */
 extern size_t sp_gc_obj_alpha1024;  /* the last gate decision, in 1024ths */
+extern int sp_gc_str_major_fixed;
+extern size_t sp_gc_str_majors;
 extern int sp_gc_obj_budget_fixed;
 extern int sp_gc_str_budget_fixed;
 /* Set for the duration of the string sweep hook on a minor cycle: only the

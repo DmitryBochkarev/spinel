@@ -58,6 +58,13 @@ size_t sp_gc_obj_alpha1024 = 1024;
    once beside the other boot-time GC modes; see the comment there. */
 int sp_gc_obj_budget_fixed = 0;
 int sp_gc_str_budget_fixed = 0;
+/* SPINEL_GC_STR_MAJOR=fixed: hold the string old generation's major gate at
+   its floor instead of re-aiming it to twice what the last major left. */
+int sp_gc_str_major_fixed = 0;
+/* String majors run on their own gate, so the object collector's `full` count
+   does not describe them: pinning that gate changed the old generation from
+   57.2 MB to 11.5 MB with the reported full count identical at 6. */
+size_t sp_gc_str_majors = 0;
 size_t sp_str_old_threshold = 1024 * 1024;
 size_t sp_str_old_threshold_init = 1024 * 1024;
 
@@ -183,6 +190,14 @@ void sp_alloc_floors_from_env(void) {
   }
   sp_alloc_floor_from_env("SPINEL_GC_THRESHOLD_OBJ_KB", &sp_gc_threshold, &sp_gc_threshold_init);
   sp_alloc_floor_from_env("SPINEL_GC_THRESHOLD_STR_KB", &sp_str_threshold, &sp_str_threshold_init);
+  /* The string heap's OLD generation has its own gate, and it is the one
+     nothing could reach. A string is promoted the first sweep it survives, and
+     an old string is reclaimed only by a MAJOR, whose trigger is re-aimed to
+     twice what the last major left. SPINEL_GC_FULL_INTERVAL does not touch it
+     -- that gates the OBJECT full cycle, which is why forcing every collection
+     full changed nothing on a program whose memory was all in the string old
+     list (#4407). This is the control that lets that be measured. */
+  sp_alloc_floor_from_env("SPINEL_GC_STR_MAJOR_KB", &sp_str_old_threshold, &sp_str_old_threshold_init);
 }
 #ifdef SP_THREADS
 void sp_alloc_worker_tune(int workers) {
@@ -287,10 +302,11 @@ static void sp_gc_stats_emit(void) {
      next sweep can reclaim, old is what only a MAJOR can, and a budget that
      promotes early can grow the second while the first looks healthy. */
   fprintf(stderr,
-          "[gcph] string live %.1f MB young + %.1f MB old  (major at %.1f MB old)\n",
+          "[gcph] string live %.1f MB young + %.1f MB old  (major at %.1f MB old, %llu so far)\n",
           (double)(sp_str_live_total() - sp_str_old_total()) / 1048576.0,
           (double)sp_str_old_total() / 1048576.0,
-          (double)sp_str_old_threshold / 1048576.0);
+          (double)sp_str_old_threshold / 1048576.0,
+          (unsigned long long)sp_gc_str_majors);
   fprintf(stderr,
           "[gcph] marked %llu objs  swept %llu slots\n",
           (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_marked), (unsigned long long)SP_GC_CTR_GET(sp_gc_ct_swept));
@@ -758,8 +774,15 @@ int sp_str_sweep_begin(int *major) {
 }
 void sp_str_sweep_end(int major, size_t promoted) {
   if (major) {
+    sp_gc_str_majors++;
     size_t old_after = sp_str_old_total();
-    sp_str_old_threshold = old_after * 2;
+    /* SPINEL_GC_STR_MAJOR=fixed holds the gate where the floor put it instead
+       of re-aiming it to twice what survived. The re-aim is a ratchet when the
+       old list is inflated by early promotion: it sets the next gate from a
+       number the same problem produced. Pinning it is what tells the two
+       apart. */
+    sp_str_old_threshold = sp_gc_str_major_fixed ? sp_str_old_threshold_init
+                                                 : old_after * 2;
     if (sp_str_old_threshold < sp_str_old_threshold_init)
       sp_str_old_threshold = sp_str_old_threshold_init;
   }
