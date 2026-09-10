@@ -344,6 +344,11 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
      param fell through to a fabricated default. */
   TyKind ds_type = TY_UNKNOWN;
   int ds_tmp = emit_ds_hash_materialize(c, kwh, &ds_type);
+  /* A key naming no parameter. The loop below walks the PARAMETERS looking for
+     keys, so a key nobody claims is simply never read -- the call ran with the
+     keyword gone. The ordinary call path has raised on this all along; sharing
+     the rule is what keeps the two answers the same (#4419). */
+  emit_unknown_kwarg_raise(c, m, kwh);
   for (int i = 0; i < m->nparams; i++) {
     emit_indent(b, din);
     { char rn[128]; snprintf(rn, sizeof rn, "_y%d_%s", tag, m->pnames[i]);

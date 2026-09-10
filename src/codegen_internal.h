@@ -438,6 +438,11 @@ void emit_rat_coerce(Compiler *c, int node, Buf *b);
 void emit_super(Compiler *c, int id, Buf *b);
 int  emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr);
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out);
+/* A keyword key the callee has no parameter for: emits the ArgumentError and
+   returns 1. Shared by emit_args_filled and the INLINE parameter binding, which
+   walks parameters looking for keys and so could not see an unclaimed one
+   (#4419). */
+int emit_unknown_kwarg_raise(Compiler *c, Scope *m, int kwh);
 int rest_shortfall_required(Compiler *c, Scope *m);
 /* Emit a hash key, unboxing a poly value to the typed-hash's key type. */
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b);

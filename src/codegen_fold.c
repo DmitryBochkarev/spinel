@@ -7344,6 +7344,40 @@ static void args_raise(const char *fmt, ...) {
   buf_printf(g_pre, "sp_raise_cls(\"ArgumentError\", \"%s\");\n", msg);
 }
 
+/* A keyword key the callee has no parameter for. CRuby raises before the body
+   runs, and so does the ordinary call path -- but a call that is INLINED has no
+   function to hand an argument list to, and its parameter binding walks the
+   PARAMETERS looking for keys rather than the keys looking for parameters. A
+   key nobody claimed was therefore never read and never complained about: the
+   DNS-rebinding pin `Net::HTTP.start(..., ipaddr: ip)` carries went out with
+   the keyword silently gone (#4419).
+   Shared rather than duplicated because a rule in two places is a rule that
+   drifts, and the two paths already disagreed. Returns 1 when it raised.
+   Guarded by kw_matches for the same reason the caller is: with no key naming a
+   keyword parameter the hash is an ordinary positional argument, and its keys
+   are data rather than keywords. */
+int emit_unknown_kwarg_raise(Compiler *c, Scope *m, int kwh) {
+  const NodeTable *nt = c->nt;
+  if (!m || kwh < 0) return 0;
+  int kw_matches = 0;
+  for (int i = 0; i < m->nparams && !kw_matches; i++)
+    if (m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]) &&
+        kwh_lookup(nt, kwh, m->pnames[i]) >= 0) kw_matches = 1;
+  if (!kw_matches) return 0;
+  int en = 0; const int *el = nt_arr(nt, kwh, "elements", &en);
+  for (int e = 0; e < en; e++) {
+    int key = el ? nt_ref(nt, el[e], "key") : -1;
+    const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
+    const char *kn = (kty && sp_streq(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
+    if (!kn) continue;
+    int found = 0;
+    for (int i = 0; i < m->nparams; i++)
+      if (m->pnames[i] && sp_streq(m->pnames[i], kn)) { found = 1; break; }
+    if (!found) { args_raise("unknown keyword: :%s", kn); return 1; }
+  }
+  return 0;
+}
+
 /* The positional count a rest-parameter method requires, when a call that
    supplies fewer is judged: the parameters without a default, the rest and
    any keyword left out. -1 when it is not judged -- no rest, a keyword or
@@ -7486,19 +7520,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
         args_raise("wrong number of arguments (given %d, expected %s)", eff_pos, expbuf2);
         raised = 1;
       }
-      if (!raised && kwh >= 0 && kw_matches) {
-        int en2 = 0; const int *el2 = nt_arr(nt, kwh, "elements", &en2);
-        for (int e = 0; e < en2 && !raised; e++) {
-          int key = el2 ? nt_ref(nt, el2[e], "key") : -1;
-          const char *kty = key >= 0 ? nt_type(nt, key) : NULL;
-          const char *kn = (kty && sp_streq(kty, "SymbolNode")) ? nt_str(nt, key, "value") : NULL;
-          if (!kn) continue;
-          int found = 0;
-          for (int i = 0; i < m->nparams; i++)
-            if (m->pnames[i] && sp_streq(m->pnames[i], kn)) { found = 1; break; }
-          if (!found) { args_raise("unknown keyword: :%s", kn); raised = 1; }
-        }
-      }
+      if (!raised && emit_unknown_kwarg_raise(c, m, kwh)) raised = 1;
       for (int i = 0; i < m->nparams && !raised; i++) {
         /* With a leading optional the shortfall is a count, not a position:
            this parameter may be undefaulted and still funded, because the
