@@ -3371,6 +3371,47 @@ static int name_used_outside(Compiler *c, int id, int skip, const char *name) {
   return 0;
 }
 
+/* Does this node READ a container that outlives the expression -- storage
+   something else still holds?
+
+   It decides whether a widening CONVERSION may be emitted over it. Converting
+   a typed array to a poly one COPIES, and a copy is right on a value the
+   expression just created and silently wrong on a value someone else holds:
+   `e = m.a` over `@a = ["seed"]` handed back a copy, so `e << 7` landed
+   nowhere and `equal?` was false where CRuby says true (#4412).
+
+   The test is READ, not "not a literal", and the difference is measured
+   rather than argued: across three real applications there are nine
+   conversion sites, and four of them take a call that RETURNS a new container
+   (`Hash.new("")`, a range) which is safe in fact. Refusing everything that is
+   not a literal would refuse six to catch two, four of them correct code.
+
+   A reader is a call whose body is a bare ivar read, which is what both
+   `attr_reader :a` and `def a; @a; end` come to. A call that builds is not
+   one, and is left alone. */
+int conv_reads_shared_storage(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  const char *ty = nt_type(nt, node);
+  if (!ty) return 0;
+  if (sp_streq(ty, "InstanceVariableReadNode")) return 1;
+  if (!sp_streq(ty, "CallNode")) return 0;
+  { int ca = nt_ref(nt, node, "arguments");
+    int an = 0; if (ca >= 0) nt_arr(nt, ca, "arguments", &an);
+    if (an > 0 || nt_ref(nt, node, "block") >= 0) return 0; }
+  const char *nm = nt_str(nt, node, "name");
+  if (!nm) return 0;
+  for (int i = 1; i < c->nscopes; i++) {
+    Scope *sc = &c->scopes[i];
+    if (!sc->name || !sp_streq(sc->name, nm) || sc->body < 0) continue;
+    int n = 0; const int *st = nt_arr(nt, sc->body, "body", &n);
+    if (n != 1 || !st) continue;
+    const char *bt = nt_type(nt, st[0]);
+    if (bt && sp_streq(bt, "InstanceVariableReadNode")) return 1;
+  }
+  return 0;
+}
+
 void proc_collect_used(Compiler *c, int id, NameSet *out) {
   if (id < 0) return;
   const char *ty = nt_type(c->nt, id);

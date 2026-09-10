@@ -6743,6 +6743,111 @@ static int oa_recv_op_ok(const char *nm, int argc, int has_block) {
    push_widened is final (during the fixpoint it is set only after
    bind_call_params has already observed the param). Monotone: typed array ->
    poly array only. (#3154) */
+/* The sibling of the pass below, for the other way an ivar's storage escapes:
+   read out through a READER into a slot that is a poly array.
+
+   `e = m.a` over `def initialize; @a = ["seed"]; end` binds a poly local,
+   because `e << 7` puts an Integer in it. The ivar stayed a str array, so the
+   emitter widened at the assignment -- and widening an array is a COPY, so
+   the push landed on the copy and `equal?` was false where CRuby says true
+   (#4412). Widening the ivar removes the conversion instead of copying
+   through it, which is what the sibling pass already does for the argument
+   shape (#3154).
+
+   Monotone and narrow: only a typed array becomes a poly array, only when the
+   slot it is read into is already one. A reader is a method whose body is a
+   bare ivar read, which is what both `attr_reader :a` and `def a; @a; end`
+   come to. */
+static const char *an_reader_ivar_name(Compiler *c, const char *mname, int cls) {
+  if (cls < 0 || !mname) return NULL;
+  /* attr_reader is synthesized, so it has no scope to read a body out of:
+     comp_resolve_member is what knows the name is an attribute, and its
+     backing ivar is the name with an @ in front (see the attr_reader
+     backing-ivar rule). */
+  { int def_cls = -1, mix = -1;
+    if (comp_resolve_member(c, cls, mname, 0, &def_cls, &mix) == SP_MEMBER_ATTR) {
+      static char ivb[128];
+      if (strlen(mname) < sizeof ivb - 2) {
+        ivb[0] = '@'; strcpy(ivb + 1, mname);
+        return ivb;
+      }
+      return NULL;
+    } }
+  int mi = comp_method_in_chain(c, cls, mname, NULL);
+  if (mi < 0) return NULL;
+  Scope *m = &c->scopes[mi];
+  if (m->body < 0) return NULL;
+  int n = 0; const int *st = nt_arr(c->nt, m->body, "body", &n);
+  if (n != 1 || !st) return NULL;
+  const char *bt = nt_type(c->nt, st[0]);
+  if (!bt || !sp_streq(bt, "InstanceVariableReadNode")) return NULL;
+  return nt_str(c->nt, st[0], "name");
+}
+static void widen_ivars_read_into_poly(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, id) {
+    int v = nt_ref(nt, id, "value");
+    if (v < 0 || nt_kind(nt, v) != NK_CallNode) continue;
+    { int ca = nt_ref(nt, v, "arguments");
+      int an = 0; if (ca >= 0) nt_arr(nt, ca, "arguments", &an);
+      if (an > 0 || nt_ref(nt, v, "block") >= 0) continue; }
+    int recv = nt_ref(nt, v, "receiver");
+    if (recv < 0) continue;
+    TyKind rt = infer_type(c, recv);
+    if (!ty_is_object(rt)) continue;
+    const char *mname = nt_str(nt, v, "name");
+    if (!mname) continue;
+    int rcls = ty_object_class(rt);
+    const char *ivn = an_reader_ivar_name(c, mname, rcls);
+    if (!ivn) continue;
+    /* the slot being written must already be a poly array: that is what says
+       the program puts something in it the ivar's element type cannot hold */
+    Scope *ws = comp_scope_of(c, id);
+    const char *wn = nt_str(nt, id, "name");
+    LocalVar *wl = (ws && wn) ? scope_local(ws, wn) : NULL;
+    if (!wl || wl->type != TY_POLY_ARRAY) continue;
+    int ivi = comp_ivar_index(&c->classes[rcls], ivn);
+    if (ivi < 0) continue;
+    TyKind ivt = c->classes[rcls].ivar_types[ivi];
+    if (!ty_is_array(ivt) || ivt == TY_POLY_ARRAY) continue;
+    c->classes[rcls].ivar_types[ivi] = TY_POLY_ARRAY;
+  }
+  /* And the shape with no local at all: a push straight through the reader,
+     `self.errors << "blank"` over `@errors = []`. The empty literal defaults
+     to an int array, so the String met sp_IntArray_push and the C compiler
+     refused it -- the same lock seen from the side where no conversion
+     exists to insert. Widen when the ivar's element type cannot hold what is
+     pushed; an int array pushed an int stays an int array. */
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || (!sp_streq(nm, "<<") && !sp_streq(nm, "push"))) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || nt_kind(nt, recv) != NK_CallNode) continue;
+    { int ca = nt_ref(nt, recv, "arguments");
+      int an = 0; if (ca >= 0) nt_arr(nt, ca, "arguments", &an);
+      if (an > 0 || nt_ref(nt, recv, "block") >= 0) continue; }
+    int rr = nt_ref(nt, recv, "receiver");
+    if (rr < 0) continue;
+    TyKind rt = infer_type(c, rr);
+    if (!ty_is_object(rt)) continue;
+    int rcls = ty_object_class(rt);
+    const char *rn = nt_str(nt, recv, "name");
+    const char *ivn = rn ? an_reader_ivar_name(c, rn, rcls) : NULL;
+    if (!ivn) continue;
+    int ivi = comp_ivar_index(&c->classes[rcls], ivn);
+    if (ivi < 0) continue;
+    TyKind ivt = c->classes[rcls].ivar_types[ivi];
+    if (!ty_is_array(ivt) || ivt == TY_POLY_ARRAY) continue;
+    int ca2 = nt_ref(nt, id, "arguments");
+    int an2 = 0; const int *av2 = ca2 >= 0 ? nt_arr(nt, ca2, "arguments", &an2) : NULL;
+    if (!av2 || an2 != 1) continue;
+    TyKind at = infer_type(c, av2[0]);
+    if (at == TY_UNKNOWN) continue;
+    if (at == ty_array_elem(ivt)) continue;
+    c->classes[rcls].ivar_types[ivi] = TY_POLY_ARRAY;
+  }
+}
+
 static void widen_ivars_from_pushed_params(Compiler *c) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_CallNode, id) {
@@ -14186,6 +14291,7 @@ void analyze_program(Compiler *c) {
      poly widening sticks, then re-derive return types only so a manual reader
      (`def flags; @flags; end`) reports the now-poly array (#3154). */
   widen_ivars_from_pushed_params(c);
+  widen_ivars_read_into_poly(c);
   g_ret_no_new_poly = 1;
   for (int iter = 0; iter < 8; iter++) if (!infer_return_types(c)) break;
   g_ret_no_new_poly = 0;

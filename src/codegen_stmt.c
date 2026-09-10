@@ -1186,6 +1186,12 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   else if (lv && lv->type == TY_POLY_ARRAY && ty_is_array(comp_ntype(c, v)) && comp_ntype(c, v) != TY_POLY_ARRAY) {
     /* widen typed array literal to PolyArray for this slot */
     TyKind vt = comp_ntype(c, v);
+    /* ...but only over a value this expression made. Over a READ it is a copy
+       of storage something else holds, and the writes that follow go to the
+       copy -- silently (#4412). See conv_reads_shared_storage. */
+    if (conv_reads_shared_storage(c, v))
+      unsupported(c, v, "widening a typed array READ from an object into a poly slot "
+                        "(the conversion copies, so writes would not be shared)");
     if (vt == TY_INT_ARRAY) { buf_puts(b, "sp_PolyArray_from_int_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
     else if (vt == TY_STR_ARRAY) { buf_puts(b, "sp_PolyArray_from_str_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
     else if (vt == TY_FLOAT_ARRAY) { buf_puts(b, "sp_PolyArray_from_float_array("); emit_expr(c, v, b); buf_puts(b, ")"); }
