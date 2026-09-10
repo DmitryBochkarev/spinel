@@ -212,7 +212,8 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
     const char *sb = getenv("SPINEL_GC_STR_BUDGET");
     sp_gc_str_budget_fixed = (sb && strcmp(sb, "fixed") == 0);
     const char *sm = getenv("SPINEL_GC_STR_MAJOR");
-    sp_gc_str_major_fixed = (sm && strcmp(sm, "fixed") == 0); }
+    sp_gc_str_major_fixed = (sm && strcmp(sm, "fixed") == 0);
+    sp_gc_str_major_sched = (sm && strcmp(sm, "interval") == 0); }
   if (sp_gc_verify) { signal(SIGSEGV, sp_gc_fault_report); signal(SIGBUS, sp_gc_fault_report); }
 }
 

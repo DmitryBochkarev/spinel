@@ -58,15 +58,56 @@ size_t sp_gc_obj_alpha1024 = 1024;
    once beside the other boot-time GC modes; see the comment there. */
 int sp_gc_obj_budget_fixed = 0;
 int sp_gc_str_budget_fixed = 0;
-/* SPINEL_GC_STR_MAJOR=fixed: hold the string old generation's major gate at
-   its floor instead of re-aiming it to twice what the last major left. */
+/* SPINEL_GC_STR_MAJOR=fixed: hold the string old generation's gate at its floor
+   instead of re-aiming it, adapting nothing. */
 int sp_gc_str_major_fixed = 0;
+/* SPINEL_GC_STR_MAJOR=interval: run the major on a SCHEDULE, with the size test
+   demoted to a backstop, the way the object heap has always run its full
+   collection. Off by default: measured against the default it is a decisive win
+   where the size gate ratchets and a real cost where it does not, and which of
+   those a program is cannot be read off the collector. See the block above
+   sp_str_major_interval. */
+int sp_gc_str_major_sched = 0;
 /* String majors run on their own gate, so the object collector's `full` count
    does not describe them: pinning that gate changed the old generation from
    57.2 MB to 11.5 MB with the reported full count identical at 6. */
 size_t sp_gc_str_majors = 0;
 size_t sp_str_old_threshold = 1024 * 1024;
 size_t sp_str_old_threshold_init = 1024 * 1024;
+/* SPINEL_GC_STR_MAJOR=interval: how many string sweeps between majors, and the
+   count that drives it. The cadence is a COUNT rather than a size because a
+   size gate re-aimed from the old list is aimed at a number the same gate
+   produced: a small budget promotes early, promotion is one-way until a major,
+   and "twice what the last major left" then sets the next gate from what early
+   promotion inflated (#4407). The object heap has never gated its full
+   collection that way -- sp_gc.c runs it on an interval and keeps the size test
+   as a backstop for growth between scheduled fulls -- and this is that policy,
+   on the heap it was missing from. The bounds are the object heap's, for the
+   same reason its comment gives.
+
+   Measured (#4407) it is not a free win, which is why it is not the default.
+   On the shape the ratchet is pathological for -- a 12 MB live set under a 4 MB
+   floor -- it cut the old generation from 67.4 MB to 21.4 MB and peak RSS from
+   135 MB to 84 MB, and ran no slower. On benchmark/bm_threaded_render.rb, where
+   the ratchet earns its memory, ten order-flipped passes a side put median RSS
+   at 770 MB against 697 and wall time level, while cutting the run-to-run
+   spread from 36% to 16% and the worst case from 914 MB to 851 MB. Removing the
+   tail by raising the floor is a trade, not a fix, and which side of it a
+   program wants is not something the collector can read off the program. */
+#define SP_STR_MAJOR_INTERVAL 8
+#define SP_STR_MAJOR_INTERVAL_MAX 128
+static int sp_str_major_interval = SP_STR_MAJOR_INTERVAL;
+static unsigned sp_str_sweep_cycle = 0;
+static int sp_str_major_forced = 0;
+/* The [gcph] line names whichever policy is running, so the number after it is
+   never read as the other one's: the default's is a size to cross, the
+   schedule's is a cadence with the size demoted to a backstop. */
+static const char *sp_str_major_label(void) {
+  static char buf[64];
+  if (!sp_gc_str_major_sched) return "at ";
+  snprintf(buf, sizeof buf, "every %d sweeps, backstop ", sp_str_major_interval);
+  return buf;
+}
 
 /* Live bytes in the old generation, across every worker's list. */
 static size_t sp_str_old_total(void) {
@@ -192,11 +233,11 @@ void sp_alloc_floors_from_env(void) {
   sp_alloc_floor_from_env("SPINEL_GC_THRESHOLD_STR_KB", &sp_str_threshold, &sp_str_threshold_init);
   /* The string heap's OLD generation has its own gate, and it is the one
      nothing could reach. A string is promoted the first sweep it survives, and
-     an old string is reclaimed only by a MAJOR, whose trigger is re-aimed to
-     twice what the last major left. SPINEL_GC_FULL_INTERVAL does not touch it
-     -- that gates the OBJECT full cycle, which is why forcing every collection
-     full changed nothing on a program whose memory was all in the string old
-     list (#4407). This is the control that lets that be measured. */
+     an old string is reclaimed only by a MAJOR. SPINEL_GC_FULL_INTERVAL does
+     not touch it -- that gates the OBJECT full cycle, which is why forcing
+     every collection full changed nothing on a program whose memory was all in
+     the string old list (#4407). This sets the floor under the growth backstop,
+     and is the control that lets the cadence be measured against a pinned one. */
   sp_alloc_floor_from_env("SPINEL_GC_STR_MAJOR_KB", &sp_str_old_threshold, &sp_str_old_threshold_init);
 }
 #ifdef SP_THREADS
@@ -302,9 +343,11 @@ static void sp_gc_stats_emit(void) {
      next sweep can reclaim, old is what only a MAJOR can, and a budget that
      promotes early can grow the second while the first looks healthy. */
   fprintf(stderr,
-          "[gcph] string live %.1f MB young + %.1f MB old  (major at %.1f MB old, %llu so far)\n",
+          "[gcph] string live %.1f MB young + %.1f MB old  "
+          "(major %s%.1f MB old, %llu so far)\n",
           (double)(sp_str_live_total() - sp_str_old_total()) / 1048576.0,
           (double)sp_str_old_total() / 1048576.0,
+          sp_str_major_label(),
           (double)sp_str_old_threshold / 1048576.0,
           (unsigned long long)sp_gc_str_majors);
   fprintf(stderr,
@@ -769,22 +812,66 @@ int sp_str_sweep_begin(int *major) {
      then re-aim that threshold at what survived. Between majors, old strings
      that die are reclaimed late -- the same delayed-reclamation trade this
      gate already makes for the whole heap, one level up. */
-  *major = sp_str_old_total() > sp_str_old_threshold;
+  /* On schedule, or forced by growth the schedule did not keep up with. The
+     forced arm is what the size test used to be on its own; behind a schedule
+     it is a backstop, which is the whole difference. */
+  if (!sp_gc_str_major_sched) { *major = sp_str_old_total() > sp_str_old_threshold; }
+  else {
+    int sched = (sp_str_sweep_cycle % (unsigned)sp_str_major_interval) == 0;
+    sp_str_sweep_cycle++;
+    sp_str_major_forced = 0;
+    if (!sched && sp_str_old_total() > sp_str_old_threshold) {
+      sched = 1; sp_str_major_forced = 1;
+    }
+    *major = sched;
+  }
   return 1;
 }
 void sp_str_sweep_end(int major, size_t promoted) {
   if (major) {
     sp_gc_str_majors++;
     size_t old_after = sp_str_old_total();
-    /* SPINEL_GC_STR_MAJOR=fixed holds the gate where the floor put it instead
-       of re-aiming it to twice what survived. The re-aim is a ratchet when the
-       old list is inflated by early promotion: it sets the next gate from a
-       number the same problem produced. Pinning it is what tells the two
-       apart. */
-    sp_str_old_threshold = sp_gc_str_major_fixed ? sp_str_old_threshold_init
-                                                 : old_after * 2;
-    if (sp_str_old_threshold < sp_str_old_threshold_init)
-      sp_str_old_threshold = sp_str_old_threshold_init;
+    /* SPINEL_GC_STR_MAJOR=fixed holds both the backstop and the cadence where
+       the floor put them, which is what makes a policy measurable against
+       itself. */
+    if (!sp_gc_str_major_fixed) {
+      /* Re-baseline the backstop: twice what this major left. That formula is
+         a ratchet when it is the ONLY gate and harmless behind a schedule,
+         which is the same bound sp_gc_collect keeps for the object old
+         generation. */
+      sp_str_old_threshold = sp_gc_sat_mul(old_after, 2);
+      if (sp_str_old_threshold < sp_str_old_threshold_init)
+        sp_str_old_threshold = sp_str_old_threshold_init;
+      /* Adapt the CADENCE from the survival RATIO. A ratio is scale-free, so
+         unlike a size it cannot carry the last major's inflation into the next
+         one. A major FORCED by the backstop is not a sample taken on schedule:
+         growth that is still live reads as ~100% survival and would lengthen
+         the cadence that was already too short to hold it. So a forced major
+         shortens and does not adapt -- sp_gc.c says this for the object heap,
+         and said it first. */
+      if (!sp_gc_str_major_sched) { /* the size gate is the whole policy */ }
+      else if (sp_str_major_forced) {
+        if (sp_str_major_interval > SP_STR_MAJOR_INTERVAL) sp_str_major_interval /= 2;
+      }
+      else if (sp_str_gate_old > 0) {
+        /* The ratio has to be taken over the OLD SET THIS MAJOR WALKED, and
+           sp_str_old_total() is not that: it already carries what this same
+           sweep promoted out of young (the note in sp_str_retune says so for
+           the same reason). Counting promotions as survivors reads a healthy
+           reclamation as ~100% survival and lengthens the cadence -- the size
+           gate's contamination, arriving a second time in ratio form. Measured
+           at a 4 MB floor it walked the interval up to 32 and left 61 MB of old
+           against a 12 MB live set. */
+        size_t before = sp_str_gate_old;
+        size_t kept = old_after > promoted ? old_after - promoted : 0;
+        if (kept > before - (before >> 2)) {                /* >75% survived */
+          if (sp_str_major_interval < SP_STR_MAJOR_INTERVAL_MAX) sp_str_major_interval *= 2;
+        }
+        else if (kept < (before >> 1)) {                   /* <50% survived */
+          if (sp_str_major_interval > SP_STR_MAJOR_INTERVAL) sp_str_major_interval /= 2;
+        }
+      }
+    }
   }
   sp_str_retune(sp_str_gate_before, promoted);
 }

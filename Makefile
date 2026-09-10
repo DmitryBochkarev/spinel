@@ -44,7 +44,7 @@ RBS_LIB      = build/librbs.a
 
 .PHONY: all regexp rbs_extract rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \
         test test-run clean-test-results regen-rbs-expected \
-        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test threaded-render-test gc-locality-test \
+        regen-expected regen-expected-err bench optcarrot gate check gate-legs gate-test gate-bench gc-phases-test gc-str-major-test threaded-render-test gc-locality-test \
         gate-optcarrot clean install uninstall deps tools
 
 # `make all` includes the RBS extractor when vendor/rbs has been fetched
@@ -697,7 +697,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test threaded-render-test gc-locality-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
+test-run: rbs-test rbs-seed-test re-lit-test reject-test backtrace-test gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test ext-test ext-cruby-test $(TEST_TARGETS) $(PKG_TEST_TARGETS)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@if [ -t 1 ]; then printf '\n'; fi
 	@pass=$$(grep -l '^PASS' build/test-results/*.ok 2>/dev/null | wc -l); \
@@ -865,6 +865,44 @@ gc-threshold-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	  { echo "gc-threshold-test: FAIL (STR_KB moved the object trigger too: $$bo -> $$so)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-threshold-test: pass"; else exit 1; fi
+
+# The string major has two policies and this leg asserts the difference is the
+# one the knob claims, on a shape where the default's size gate ratchets: a
+# 12 MB live string set under a 4 MB pinned floor, so promotion runs ahead of
+# the gate. Everything here is a comparison of the two arms in the SAME run of
+# the same binary on the same machine -- no absolute either arm has to hit,
+# because both numbers are set by how much this box promotes (#4407).
+gc-str-major-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+	@tmp=$$(mktemp -d /tmp/spinel-gcstrmaj.XXXXXX); ok=1; \
+	src=test/gc_str_major_interval.rb; \
+	$(SPINEL) "$$src" -o "$$tmp/t" >/dev/null 2>&1 || \
+	  { echo "gc-str-major-test: FAIL (compile)"; rm -rf "$$tmp"; exit 1; }; \
+	run() { SPINEL_GC_STR_BUDGET=fixed SPINEL_GC_THRESHOLD_STR_KB=4096 \
+	        SPINEL_GC_PHASES=1 $(TIMEOUT60) "$$tmp/t" > "$$tmp/$$1.out" 2> "$$tmp/$$1.err"; }; \
+	run default; \
+	SPINEL_GC_STR_MAJOR=interval; export SPINEL_GC_STR_MAJOR; run interval; \
+	unset SPINEL_GC_STR_MAJOR; \
+	for m in default interval; do \
+	  cmp -s "$$tmp/$$m.out" "$$src.expected" || \
+	    { echo "gc-str-major-test: FAIL ($$m changed the answer)"; ok=0; }; \
+	done; \
+	old_of() { sed -n 's/.*+ \([0-9.]*\) MB old .*/\1/p' "$$1" | tail -1; }; \
+	maj_of() { sed -n 's/.*old, \([0-9]*\) so far.*/\1/p' "$$1" | tail -1; }; \
+	do=$$(old_of "$$tmp/default.err"); io=$$(old_of "$$tmp/interval.err"); \
+	dm=$$(maj_of "$$tmp/default.err"); im=$$(maj_of "$$tmp/interval.err"); \
+	for v in "$$do" "$$io" "$$dm" "$$im"; do \
+	  [ -n "$$v" ] || { echo "gc-str-major-test: FAIL (no [gcph] string live line)"; ok=0; break; }; \
+	done; \
+	grep -q "major at " "$$tmp/default.err" || \
+	  { echo "gc-str-major-test: FAIL (the schedule is on without the knob)"; ok=0; }; \
+	grep -q "major every .* sweeps, backstop " "$$tmp/interval.err" || \
+	  { echo "gc-str-major-test: FAIL (the knob did not select the schedule)"; ok=0; }; \
+	awk -v a="$$im" -v b="$$dm" 'BEGIN{exit !(a > b)}' || \
+	  { echo "gc-str-major-test: FAIL (the schedule did not run more majors: $$dm -> $$im)"; ok=0; }; \
+	awk -v a="$$io" -v b="$$do" 'BEGIN{exit !(a <= b)}' || \
+	  { echo "gc-str-major-test: FAIL (the schedule left MORE old behind: $$do -> $$io)"; ok=0; }; \
+	rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "gc-str-major-test: pass"; else exit 1; fi
 
 # The object budget is priced off objects PLUS strings by default;
 # SPINEL_GC_OBJ_BUDGET=obj restores pricing it off the object heap alone.
