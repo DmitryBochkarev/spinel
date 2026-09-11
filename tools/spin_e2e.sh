@@ -591,7 +591,7 @@ rm -rf "$XDG_CACHE_HOME/spin/native"          # cold: `flags` must compile the c
 FLAGS=$("$SPIN" flags 2>/dev/null)
 # One line. A cold cache compiles here, and that progress used to print on
 # stdout, which would splice `cc fast/fast_ext.c` into the flag string.
-[ "$(printf '%s' "$FLAGS" | wc -l)" = "0" ] || fail "spin flags: progress leaked onto stdout"
+[ "$(printf '%s' "$FLAGS" | wc -l | tr -d ' ')" = "0" ] || fail "spin flags: progress leaked onto stdout"
 case "$FLAGS" in
   --require-gate*) ;;
   *) fail "spin flags: does not carry the require gate spin build compiles under" ;;
