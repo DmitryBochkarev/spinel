@@ -20142,7 +20142,14 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       else buf_puts(b, "sp_raise(sp_exc_no_msg)");   /* a bare raise's message is "" (#3711) */
     }
     else if (ac == 1 && nt_type(nt, av[0]) &&
-             (sp_streq(nt_type(nt, av[0]), "ConstantReadNode") || sp_streq(nt_type(nt, av[0]), "ConstantPathNode"))) {
+             (sp_streq(nt_type(nt, av[0]), "ConstantReadNode") || sp_streq(nt_type(nt, av[0]), "ConstantPathNode")) &&
+             /* a constant holding an exception INSTANCE (`ERR = RuntimeError.new(..)`;
+                `raise ERR`) is a value, not a class name: it takes the object
+                path below, or it raised a class called "ERR" */
+             !(comp_class_index(c, nt_str(nt, av[0], "name")) < 0 &&
+               (comp_ntype(c, av[0]) == TY_EXCEPTION ||
+                (ty_is_object(comp_ntype(c, av[0])) &&
+                 class_is_exc_subclass(c, ty_object_class(comp_ntype(c, av[0]))))))) {
       /* `raise E` with a user-defined E#initialize is `raise E.new`: construct
          the object (filling initialize's defaults) so its custom initialize and
          any `super`/message run. Without a custom initialize the message
