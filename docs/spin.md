@@ -411,8 +411,10 @@ pack demo -> /path/to/demo/build/pack/demo
 ```
 
 It contains the generated C, the runtime sources, the sources of every native
-package the build links, and a Makefile. `--out DIR` puts it somewhere else.
-One executable at a time; name it when the project has several.
+package the build links -- bundled or a dependency, whose objects live in the
+shared cache rather than beside their source -- and a Makefile. `--out DIR`
+puts it somewhere else. One executable at a time; name it when the project has
+several.
 
 **The Makefile is derived, not written.** `spinel --print-build` reports the
 ingredients the program requires -- its defines, include paths, libraries and

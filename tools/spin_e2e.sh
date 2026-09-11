@@ -888,15 +888,20 @@ fi
 # package on purpose: those are what make the pack more than a copy, since the
 # threaded runtime needs -DSP_THREADS to reach the runtime sources as well as
 # the generated TU, and a package travels as source rather than as the object
-# built for the packer's platform.
+# built for the packer's platform. The dependency with carried C (spinel-fast,
+# from the M2 case above) is the other kind of native package: a bundled one
+# compiles beside its source, a dependency compiles into the shared cache, and
+# the pack has to find the source of each.
 cd "$WORK"
 "$SPIN" new packer >/dev/null || fail "pack: new"
 cd packer
+printf '[package]\nname = "packer"\n\n[dependencies]\nfast = { path = "../spinel-fast" }\n' > spin.toml
 cat > bin/packer.rb <<'RBEOF'
 require "json"
+require "fast"
 ths = (0...4).map { |i| Thread.new(i) { |n| n * 10 } }
 puts "threads #{ths.map(&:value).inspect}"
-puts "json #{JSON.generate({ "a" => 1, "b" => [2, 3] })}"
+puts "json #{JSON.generate({ "a" => 1, "b" => [2, 3] })} fast #{Fast.fast_quad(10)}"
 RBEOF
 REF=$("$SPIN" run 2>&1 | tail -2 | tr '\n' '|')
 "$SPIN" pack >/dev/null 2>&1 || fail "pack: spin pack"
@@ -905,6 +910,7 @@ REF=$("$SPIN" run 2>&1 | tail -2 | tr '\n' '|')
 [ -f build/pack/packer/lib/sp_gc.c ] || fail "pack: no runtime source"
 [ -f build/pack/packer/lib/spinel/runtime.h ] || fail "pack: no package ABI header"
 [ -f build/pack/packer/native/sp_json.c ] || fail "pack: native package not carried as source"
+[ -f build/pack/packer/native/fast_ext.c ] || fail "pack: dependency's native C not carried as source"
 grep -q -- "-DSP_THREADS" build/pack/packer/Makefile || fail "pack: threaded program without -DSP_THREADS"
 grep -q -- "-lpthread" build/pack/packer/Makefile || fail "pack: threaded program without -lpthread"
 # What the pack must NOT carry: how THIS build was run. The compiler reports
