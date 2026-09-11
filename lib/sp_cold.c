@@ -3916,3 +3916,80 @@ SP_NORETURN void sp_raise_cannot_freeze(const char *cls, void *p) {
                sp_sprintf("cannot freeze #<%s:0x%016llx>", cls ? cls : "Object",
                           (unsigned long long)(uintptr_t)p));
 }
+
+/* ---- String#encode(dst [, src] [, invalid:, undef:, replace:]) ----
+   The runtime models two encodings, UTF-8 and ASCII-8BIT (docs: the encoding
+   model), so a transcode is one of four pairs. Same-encoding: the bytes,
+   scrubbed only under invalid: :replace, as CRuby does. Binary to UTF-8, and
+   UTF-8 to binary: every byte >= 0x80 (every non-ASCII character) has no
+   mapping, which is Encoding::UndefinedConversionError naming the byte or the
+   code point, or the replacement under undef: :replace. The replacement
+   defaults to U+FFFD for a UTF-8 target and "?" otherwise, as CRuby's does.
+   A name the model does not know (ISO-8859-1, UTF-16) is left as the bytes,
+   which is what every earlier spinel answered for the whole method (#4439). */
+static int sp_enc_kind(sp_RbVal e, int dflt) {   /* 1 UTF-8, 2 binary, 0 unknown */
+  const char *n = NULL;
+  if (e.tag == SP_TAG_STR || e.tag == SP_TAG_ENCODING) n = e.v.s;
+  else return dflt;
+  if (!n) return dflt;
+  if (!strcasecmp(n, "UTF-8") || !strcasecmp(n, "UTF8")) return 1;
+  if (!strcasecmp(n, "ASCII-8BIT") || !strcasecmp(n, "BINARY")) return 2;
+  return 0;
+}
+static int sp_enc_kw_replace(sp_RbVal v) {   /* `invalid: :replace` / `undef: :replace` */
+  return v.tag == SP_TAG_SYM && sp_sym_name_fn && sp_sym_name_fn((sp_sym)v.v.i) &&
+         !strcmp(sp_sym_name_fn((sp_sym)v.v.i), "replace");
+}
+const char *sp_str_encode(const char *s, sp_RbVal dst, sp_RbVal src,
+                          sp_RbVal invalid, sp_RbVal undef, sp_RbVal replace) {
+  SP_GC_ROOT_STR(s); SP_GC_ROOT_RBVAL(dst); SP_GC_ROOT_RBVAL(src); SP_GC_ROOT_RBVAL(replace);
+  if (!s) sp_nil_recv("encode");
+  int from = sp_enc_kind(src, sp_str_is_binary(s) ? 2 : 1);
+  int to = sp_enc_kind(dst, 1);
+  if (!from || !to) return s;
+  const char *repl = (replace.tag == SP_TAG_STR && replace.v.s) ? replace.v.s : NULL;
+  SP_GC_ROOT_STR(repl);
+  if (from == to) {
+    if (from == 1 && sp_enc_kw_replace(invalid)) return sp_str_scrub(s, repl);
+    return s;
+  }
+  /* binary <-> UTF-8: the ASCII bytes carry over, nothing else does */
+  size_t bl = sp_str_byte_len(s);
+  int undef_replace = sp_enc_kw_replace(undef);
+  const char *dflt = to == 1 ? "\xEF\xBF\xBD" : "?";
+  const char *r = repl ? repl : dflt;
+  size_t rl = strlen(r);
+  size_t cap = bl + 1, o = 0;
+  char *out = (char *)malloc(cap);
+  if (!out) sp_oom_die();
+  for (size_t i = 0; i < bl; ) {
+    unsigned char b = (unsigned char)s[i];
+    size_t w = 1;
+    if (b < 0x80) { if (o + 1 >= cap) { cap *= 2; out = (char *)realloc(out, cap); if (!out) sp_oom_die(); } out[o++] = (char)b; i++; continue; }
+    if (from == 1) { w = (size_t)sp_utf8_advance(s + i); if (w == 0 || i + w > bl) w = 1; }
+    if (!undef_replace) {
+      char what[64];
+      if (from == 2) snprintf(what, sizeof what, "\"\\x%02X\"", b);
+      else {
+        unsigned cp = 0;
+        if (w == 1) cp = b;
+        else if (w == 2) cp = ((b & 0x1Fu) << 6) | ((unsigned char)s[i+1] & 0x3Fu);
+        else if (w == 3) cp = ((b & 0x0Fu) << 12) | (((unsigned char)s[i+1] & 0x3Fu) << 6) | ((unsigned char)s[i+2] & 0x3Fu);
+        else cp = ((b & 0x07u) << 18) | (((unsigned char)s[i+1] & 0x3Fu) << 12) | (((unsigned char)s[i+2] & 0x3Fu) << 6) | ((unsigned char)s[i+3] & 0x3Fu);
+        snprintf(what, sizeof what, "U+%04X", cp);
+      }
+      free(out);
+      sp_raise_cls("Encoding::UndefinedConversionError",
+                   sp_sprintf("%s from %s to %s", what, from == 2 ? "ASCII-8BIT" : "UTF-8",
+                              to == 2 ? "ASCII-8BIT" : "UTF-8"));
+    }
+    while (o + rl + 1 >= cap) { cap *= 2; out = (char *)realloc(out, cap); if (!out) sp_oom_die(); }
+    memcpy(out + o, r, rl); o += rl;
+    i += w;
+  }
+  char *res = sp_str_alloc_raw(o + 1);
+  memcpy(res, out, o); res[o] = 0; sp_str_set_len(res, o);
+  free(out);
+  if (to == 2) sp_str_mark_binary(res);
+  return res;
+}

@@ -4,6 +4,8 @@
 
 #include "codegen_internal.h"
 
+static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b);
+
 /* Object's identity protocol, text form (defined with its node form at the end of this file). */
 static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKind rt, const char *r, TyKind at, const char *a, Buf *b);
 
@@ -7458,7 +7460,11 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
            handing back a frozen literal made `s.b << x` raise FrozenError */
         buf_printf(b, "sp_str_b(%s)", r);
       }
-      else if ((sp_streq(name, "b") || sp_streq(name, "encode")) && argc <= 2) buf_printf(b, "(%s)", r);
+      else if (sp_streq(name, "b") && argc <= 2) buf_printf(b, "(%s)", r);
+      /* encode with no argument is the receiver; with a destination it is a
+         transcode between the two encodings the runtime models (#4439) */
+      else if (sp_streq(name, "encode") && argc == 0) buf_printf(b, "(%s)", r);
+      else if (sp_streq(name, "encode") && argc <= 3) emit_str_encode_call(c, r, argv, argc, b);
       /* the answer is the receiver's own tag, not the constant UTF-8 this arm
          used to fold to while discarding the receiver: pack and String#b tag
          their answer BINARY, and every other reader of that tag agreed */
@@ -10166,6 +10172,29 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
+
+/* String#encode(dst [, src] [, invalid:, undef:, replace:]): the destination
+   and source (a name or an Encoding) and the three keywords travel boxed, and
+   the runtime decides the pair. `recv_txt` is the receiver's `const char *`
+   expression. */
+static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int kwh = -1, pos = argc;
+  if (argc > 0 && nt_type(nt, argv[argc - 1]) && sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode")) {
+    kwh = argv[argc - 1]; pos = argc - 1;
+  }
+  buf_printf(b, "sp_str_encode(%s, ", recv_txt);
+  if (pos >= 1) emit_boxed(c, argv[0], b); else buf_puts(b, "sp_box_nil()");
+  buf_puts(b, ", ");
+  if (pos >= 2) emit_boxed(c, argv[1], b); else buf_puts(b, "sp_box_nil()");
+  static const char *const KW[] = { "invalid", "undef", "replace" };
+  for (int k = 0; k < 3; k++) {
+    buf_puts(b, ", ");
+    int v = kwh >= 0 ? kwh_lookup(nt, kwh, KW[k]) : -1;
+    if (v >= 0) emit_boxed(c, argv[0] == v ? v : v, b); else buf_puts(b, "sp_box_nil()");
+  }
+  buf_puts(b, ")");
+}
 int emit_value_recv_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -13037,7 +13066,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       ((sp_streq(name, "unpack") && argc == 1) ||
        (sp_streq(name, "byteslice") && (argc == 1 || argc == 2)) ||
        (sp_streq(name, "scrub") && argc == 1) ||
-       (sp_streq(name, "encode") && (argc == 1 || argc == 2)))) {
+       (sp_streq(name, "encode") && argc >= 1 && argc <= 3))) {
     if (sp_streq(name, "unpack")) {
       buf_puts(b, "sp_box_poly_array(sp_str_unpack(sp_poly_recv_s(");
       emit_expr(c, recv, b); buf_puts(b, ", \"unpack\"), ");
@@ -13072,9 +13101,13 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       emit_expr(c, recv, b); buf_puts(b, ", \"scrub\"), ");
       emit_str_expr(c, argv[0], b); buf_puts(b, "))");
     }
-    else {  /* encode: every string here is UTF-8, so it only unboxes */
-      buf_puts(b, "sp_box_str(sp_poly_recv_s(");
-      emit_expr(c, recv, b); buf_puts(b, ", \"encode\"))");
+    else {  /* encode: the same transcode the String receiver takes (#4439) */
+      Buf rb; memset(&rb, 0, sizeof rb);
+      buf_puts(&rb, "sp_poly_recv_s("); emit_expr(c, recv, &rb); buf_puts(&rb, ", \"encode\")");
+      buf_puts(b, "sp_box_str(");
+      emit_str_encode_call(c, rb.p ? rb.p : "", argv, argc, b);
+      buf_puts(b, ")");
+      free(rb.p);
     }
     return 1;
   }

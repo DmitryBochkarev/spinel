@@ -4463,7 +4463,7 @@ else {
       if ((sp_streq(name, "unpack") && argc == 1) ||
           (sp_streq(name, "byteslice") && (argc == 1 || argc == 2)) ||
           (sp_streq(name, "scrub") && argc == 1) ||
-          (sp_streq(name, "encode") && (argc == 1 || argc == 2)))
+          (sp_streq(name, "encode") && argc >= 1 && argc <= 3))
         return an_poly_concrete(c, name, TY_POLY);
       /* chomp / chop / delete_prefix / delete_suffix answer a String and are
          served at argc 0 only, so the separator forms -- `line.chomp("|")`,
@@ -6389,11 +6389,15 @@ TyKind infer_uncached(Compiler *c, int id) {
       if (nm && (sp_streq(nm, "IGNORECASE") || sp_streq(nm, "EXTENDED") ||
                  sp_streq(nm, "MULTILINE"))) return TY_INT;
     }
-    if (par_nm && sp_streq(par_nm, "Encoding") && nm &&
-        (sp_streq(nm, "UTF_8") || sp_streq(nm, "UTF8") || sp_streq(nm, "US_ASCII") ||
-         sp_streq(nm, "ASCII") || sp_streq(nm, "ANSI_X3_4_1968") ||
-         sp_streq(nm, "BINARY") || sp_streq(nm, "ASCII_8BIT")))
-      return TY_POLY;  /* a boxed Encoding value */
+    if (par_nm && sp_streq(par_nm, "Encoding") && nm) {
+      /* every ALL_CAPS Encoding constant is a boxed Encoding value: the two
+         the runtime transcodes and every other name it only carries (see the
+         codegen arm) */
+      int caps = 1;
+      for (const char *q = nm; *q; q++)
+        if (!((*q >= 'A' && *q <= 'Z') || (*q >= '0' && *q <= '9') || *q == '_')) { caps = 0; break; }
+      if (caps && *nm) return TY_POLY;
+    }
     if (par_nm && sp_streq(par_nm, "File")) {
       if (nm && (sp_streq(nm, "SEPARATOR") || sp_streq(nm, "PATH_SEPARATOR") ||
                  sp_streq(nm, "ALT_SEPARATOR") || sp_streq(nm, "NULL"))) return TY_STRING;

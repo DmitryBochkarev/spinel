@@ -180,6 +180,7 @@ const char*sp_str_squeeze_chars(const char*s,const char*cs);
 const char*sp_str_delete_n(const char*s,const char**chars,sp_int n);
 const char*sp_str_squeeze_n(const char*s,const char**chars,sp_int n);
 const char *sp_str_scrub(const char *s, const char *repl);
+const char *sp_str_encode(const char *s, sp_RbVal dst, sp_RbVal src, sp_RbVal invalid, sp_RbVal undef, sp_RbVal replace);
 const char *sp_str_scrub_bang(const char *s, const char *repl);
 const char*sp_str_ljust(const char*s,sp_int w);
 const char*sp_str_rjust(const char*s,sp_int w);
