@@ -1447,7 +1447,12 @@ def cmd_pack(prj, targets, outdir)
     if kind == "define" || kind == "cflag"
       cflags += " " + val
     elsif kind == "lib"
-      libs += " " + val
+      # -lcrypt is the one ingredient the compiler reports for ITS platform
+      # rather than the program's: String#crypt is libc crypt(3), which glibc
+      # ships as a separate library and Darwin folds into libSystem. A pack
+      # made on a Mac would omit it and fail to link on Linux, so the Makefile
+      # decides it from the recipient's uname instead (below).
+      libs += " " + val unless val == "-lcrypt"
     elsif kind == "include"
       # every include pointed into the compiler's tree; the pack has its own
     elsif kind == "source"
@@ -1520,6 +1525,11 @@ def cmd_pack(prj, targets, outdir)
 "        "CC ?= cc
 "        "CFLAGS ?= -O2#{cflags} -Ilib -Ilib/regexp
 "        "LIBS ?=#{libs}
+"        "# String#crypt is libc crypt(3): a separate library on glibc, inside
+"        "# libSystem on Darwin. The recipient's platform decides, not the packer's.
+"        "ifneq ($(shell uname -s),Darwin)
+"        "LIBS += -lcrypt
+"        "endif
 "        "
 "        "RT := $(wildcard lib/*.c) $(wildcard lib/regexp/*.c)
 "        "NATIVE :=#{natives}

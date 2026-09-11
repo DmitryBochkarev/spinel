@@ -901,7 +901,7 @@ require "json"
 require "fast"
 ths = (0...4).map { |i| Thread.new(i) { |n| n * 10 } }
 puts "threads #{ths.map(&:value).inspect}"
-puts "json #{JSON.generate({ "a" => 1, "b" => [2, 3] })} fast #{Fast.fast_quad(10)}"
+puts "json #{JSON.generate({ "a" => 1, "b" => [2, 3] })} fast #{Fast.fast_quad(10)} crypt #{"spin".crypt("ab")}"
 RBEOF
 REF=$("$SPIN" run 2>&1 | tail -2 | tr '\n' '|')
 "$SPIN" pack >/dev/null 2>&1 || fail "pack: spin pack"
@@ -913,6 +913,11 @@ REF=$("$SPIN" run 2>&1 | tail -2 | tr '\n' '|')
 [ -f build/pack/packer/native/fast_ext.c ] || fail "pack: dependency's native C not carried as source"
 grep -q -- "-DSP_THREADS" build/pack/packer/Makefile || fail "pack: threaded program without -DSP_THREADS"
 grep -q -- "-lpthread" build/pack/packer/Makefile || fail "pack: threaded program without -lpthread"
+# -lcrypt is the recipient's platform's to decide (glibc ships it, Darwin does
+# not), so it must not be baked from the packer's: the Makefile carries the
+# uname conditional, and the program's String#crypt above links through it.
+grep -q -- "^LIBS ?=.*-lcrypt" build/pack/packer/Makefile && fail "pack: -lcrypt baked from the packer's platform"
+grep -q -- "uname -s" build/pack/packer/Makefile || fail "pack: Makefile does not decide -lcrypt by platform"
 # What the pack must NOT carry: how THIS build was run. The compiler reports
 # ingredients, not a command line, so the packer's optimisation level, its
 # warning policy, its diagnostic formatting and its linker's spelling of
