@@ -10954,13 +10954,19 @@ static int scope_yields_inside_lifted_body(Compiler *c, int mi) {
   const NodeTable *nt = c->nt;
   for (int id = 0; id < nt->count; id++) {
     if (c->nscope[id] != mi || nt_kind(nt, id) != NK_CallNode) continue;
+    int blk = nt_ref(nt, id, "block");
+    if (blk < 0 || !subtree_has_yield_node(c, blk, 0)) continue;
     const char *nm = nt_str(nt, id, "name");
-    if (!nm || !sp_streq(nm, "new")) continue;
     int r = nt_ref(nt, id, "receiver");
     const char *rn = (r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode) ? nt_str(nt, r, "name") : NULL;
-    if (!rn || (!sp_streq(rn, "Thread") && !sp_streq(rn, "Fiber"))) continue;
-    int blk = nt_ref(nt, id, "block");
-    if (blk >= 0 && subtree_has_yield_node(c, blk, 0)) return 1;
+    if (nm && sp_streq(nm, "new") && rn && (sp_streq(rn, "Thread") || sp_streq(rn, "Fiber"))) return 1;
+    /* The same for a block that becomes a first-class proc because its
+       callee keeps a real &blk: the proc's body is its own C function, where
+       the enclosing method's block is as out of reach as it is from a
+       Thread's. `Net::HTTP#request(req, &blk)` with `blk.call(res) unless
+       blk.nil?` is that callee, and campfire's `yield response` inside the
+       block it is given raised LocalJumpError (#4438). */
+    if (a_block_is_lifted(c, id)) return 1;
   }
   return 0;
 }
@@ -14034,8 +14040,13 @@ void analyze_program(Compiler *c) {
        so the splice emitted a LocalJumpError raise and the surrounding
        expression was then ill-typed. Lowering forwards the block as a proc the
        lifted body can call (#3355). */
-    int thread_yld = scope_yields_inside_lifted_body(c, mi);
-    if (!scope_calls_itself(c, mi) && !thread_yld) continue;
+    /* A self-recursive yielder's `{ yield }` is itself a lifted block (it is
+       passed to the lowered method), so the recursion form is asked first:
+       it carries the block's value back at its real type, which the lifted
+       form does not. */
+    int self_rec = scope_calls_itself(c, mi);
+    int thread_yld = !self_rec && scope_yields_inside_lifted_body(c, mi);
+    if (!self_rec && !thread_yld) continue;
     m->is_lowered_yield = 1;
     m->lowered_lifted_yield = thread_yld;
     m->yields = 0;
