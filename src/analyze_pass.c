@@ -7192,6 +7192,25 @@ int infer_block_params(Compiler *c) {
         }
         continue;
       }
+      /* A block handed to a user method that neither yields nor names a
+         &block (nor forwards to one that does) never runs, and codegen drops
+         it. Its params then had no evidence at all and stayed UNKNOWN, which
+         is "not yet", not "nothing": a `return response[...]` inside such a
+         block typed UNKNOWN, unified with the raising body's void, and the
+         method came out void -- so a caller reading its value was refused
+         (#4431). The block's value flows nowhere, so poly costs nothing. */
+      if (mi >= 0 && !c->scopes[mi].yields &&
+          !(c->scopes[mi].blk_param && c->scopes[mi].blk_param[0]) &&
+          forwarding_yield_target(c, mi, 0) < 0) {
+        Scope *bs = comp_scope_of(c, block);
+        for (int k = 0; ; k++) {
+          const char *bp = block_param_name(c, block, k);
+          if (!bp) break;
+          LocalVar *lv = scope_local_intern(bs, bp); lv->is_block_param = 1;
+          if (lv->type != TY_POLY) { lv->type = TY_POLY; changed = 1; }
+        }
+        continue;
+      }
     }
 
     if (recv < 0) continue;
