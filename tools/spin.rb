@@ -1141,6 +1141,32 @@ class Project
     end
   end
 
+  # The source a carried-C object was compiled from, or "" when there is no
+  # telling. A bundled package (the compiler's own packages/) compiles beside
+  # its source. A dependency compiles into the shared object cache, one
+  # directory per (package, version, compiler) whose layout mirrors the
+  # package tree -- so the object's path below that directory names its source
+  # within the package. `_mt` marks the threaded variant of one source file.
+  def native_source_for(obj)
+    base = File.basename(obj)
+    stem = base[0, base.length - 2]
+    stem = stem[0, stem.length - 3] if stem.length > 3 && stem[stem.length - 3, 3] == "_mt"
+    beside = File.join(File.dirname(obj), stem + ".c")
+    return beside if File.exist?(beside)
+    @dep_srcs.split("\n").each do |s|
+      f = s.split("\t")
+      key = "/" + f[0] + "-" + f[2] + "-" + cc_cache_key + "/"
+      at = obj.index(key)
+      next if at.nil?
+      rel = obj[(at + key.length)..-1].to_s
+      rel = rel[0, rel.length - 2]
+      rel = rel[0, rel.length - 3] if rel.length > 3 && rel[rel.length - 3, 3] == "_mt"
+      src = File.join(f[1], rel + ".c")
+      return src if File.exist?(src)
+    end
+    ""
+  end
+
   # carried native C across the root package and every resolved dep (M2)
   def native_objs
     objs = []
@@ -1440,18 +1466,17 @@ def cmd_pack(prj, targets, outdir)
       # a package's native object. Its SOURCE is what travels; the object was
       # built for the packer's platform and the pack exists to leave that
       # behind. A `_mt` object is the threaded variant of one source file.
-      base = File.basename(val)
-      stem = base[0, base.length - 2]
-      stem = stem[0, stem.length - 3] if stem.length > 3 && stem[stem.length - 3, 3] == "_mt"
-      src = File.join(File.dirname(val), stem + ".c")
-      if File.exist?(src)
+      src = prj.native_source_for(val)
+      if src != ""
+        stem = File.basename(src)
+        stem = stem[0, stem.length - 2]
         pack_copy(src, File.join(outdir, "native", stem + ".c"))
         natives += " native/" + stem + ".o"
-        Dir.glob(File.join(File.dirname(val), "*.h")).each do |hf|
+        Dir.glob(File.join(File.dirname(src), "*.h")).each do |hf|
           pack_copy(hf, File.join(outdir, "native", File.basename(hf)))
         end
       else
-        puts "pack: warning: no source beside #{base}; the pack will not build without it"
+        puts "pack: warning: no source for #{File.basename(val)}; the pack will not build without it"
       end
     end
   end
