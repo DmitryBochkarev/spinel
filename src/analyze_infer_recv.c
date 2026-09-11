@@ -1648,8 +1648,15 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       { *out = TY_STR_ARRAY; return 1; }
     if (argc == 2 && sp_streq(name, "tr_s")) { *out = TY_STRING; return 1; }
     if (argc == 1 && sp_streq(name, "crypt")) { *out = TY_STRING; return 1; }
-    /* #slice re-enters codegen as #[], whose boxed result is poly. */
-    if ((argc == 1 || argc == 2) && sp_streq(name, "slice")) { *out = TY_POLY; return 1; }
+    /* #slice on a boxed receiver is answered by one emitter for ANY key count:
+       it branches at run time between Hash#slice(*keys) and the #[] re-entry,
+       and both arms hand back an sp_RbVal. This rule said so only for one or
+       two keys, so a three-key `attributes.slice("a", "b", "c")` fell through
+       to a typing that named a concrete hash kind, and the comparison site then
+       boxed a value that was already boxed:
+       `sp_box_nullable_obj((void *)<sp_RbVal>)`, which clang refused (#4429).
+       The arity guard matches the emitter's now. */
+    if (argc >= 1 && sp_streq(name, "slice")) { *out = TY_POLY; return 1; }
   }
   /* The String value-form mutators on a boxed receiver answer the mutated
      string (NULL for the no-change bang contract), like the typed path. */
