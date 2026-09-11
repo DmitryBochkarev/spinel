@@ -1121,6 +1121,35 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   if (args >= 0) argv = nt_arr(nt, args, "arguments", &argc);
   if (!name) return TY_UNKNOWN;
 
+  /* `Module.accessor.cmethod(...)` where the singleton accessor statically
+     folds to a constant: dispatch as that constant's class method. This has to
+     come BEFORE anything that decides by the receiver's type, because the
+     receiver -- a `class << self; attr_reader` read -- types poly (its slot
+     holds a class value), and every rule that answers a poly receiver answers
+     poly. It sat below them, and was never reached: the emitter, which asks
+     the same fold, devirtualized the call to the class method's C function
+     while the site expected an sp_RbVal, and clang refused the seam (#4426).
+     The hand-written `def self.adapter; @adapter; end` never had the problem
+     because that reader is a class method with a typed return, not a slot. */
+  if (recv >= 0) {
+    int fold_ci = comp_sg_reader_const(c, recv);
+    if (fold_ci >= 0) {
+      int mi = comp_cmethod_in_chain(c, fold_ci, name, NULL);
+      if (mi >= 0) return method_call_ret(c, mi, id);
+    }
+    /* Stage-2: accessor holds one of several constants; unify their cmethod returns. */
+    int cand[32];
+    int ncand = comp_sg_reader_candidates(c, recv, cand, 32);
+    if (ncand >= 2) {
+      TyKind r = TY_UNKNOWN;
+      for (int k = 0; k < ncand; k++) {
+        int mi = comp_cmethod_in_chain(c, cand[k], name, NULL);
+        if (mi >= 0) r = ty_unify(r, method_call_ret(c, mi, id));
+      }
+      if (r != TY_UNKNOWN) return r;
+    }
+  }
+
   /* The universal predicates and conversions the poly runtime answers as a RAW
      C scalar. The emitters have always known this; the TYPE did not say it, so
      `x&.frozen?` was inferred poly while its value arm rendered an sp_bool, and
@@ -3393,27 +3422,6 @@ else {
     { size_t tnl = strlen(name); if (tnl > 0 && name[tnl - 1] == '?') return TY_BOOL; }
     /* year/mon/day/hour/min/sec/wday/yday/to_i/tv_sec/tv_usec/usec/tv_nsec/nsec/... */
     return TY_INT;
-  }
-
-  /* `Module.accessor.cmethod(...)` where the singleton accessor statically
-     folds to a constant (Stage-1): dispatch as that constant's class method. */
-  if (recv >= 0) {
-    int fold_ci = comp_sg_reader_const(c, recv);
-    if (fold_ci >= 0) {
-      int mi = comp_cmethod_in_chain(c, fold_ci, name, NULL);
-      if (mi >= 0) return method_call_ret(c, mi, id);
-    }
-    /* Stage-2: accessor holds one of several constants; unify their cmethod returns. */
-    int cand[32];
-    int ncand = comp_sg_reader_candidates(c, recv, cand, 32);
-    if (ncand >= 2) {
-      TyKind r = TY_UNKNOWN;
-      for (int k = 0; k < ncand; k++) {
-        int mi = comp_cmethod_in_chain(c, cand[k], name, NULL);
-        if (mi >= 0) r = ty_unify(r, method_call_ret(c, mi, id));
-      }
-      if (r != TY_UNKNOWN) return r;
-    }
   }
 
   /* Class.cmethod(...) / M::Sub.cmethod(...) -> the class method's return type.
