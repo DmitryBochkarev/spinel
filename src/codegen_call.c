@@ -6056,16 +6056,31 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         int r_idx = c->scopes[mi].rest_idx;
         int npost = c->scopes[mi].npost_rest;
         int rest_end = pos_argc - npost;   /* where the *rest collection stops */
+        /* A default reading an earlier parameter (`def g(u, v = u.upcase)`)
+           is evaluated in the callee, where that parameter is bound. This arm
+           spells each argument inline, so the default read the callee's
+           `lv_u` at the call site: undeclared, or worse a caller local of the
+           same name (#4431). When such a default exists the arm binds each
+           argument to a named local inside a statement expression first, the
+           way emit_args_filled does, and renames the parameter to it. */
+        int pd_arm = r_idx < 0 && c->scopes[mi].kwrest_idx < 0 &&
+                     default_refs_earlier_param(c, &c->scopes[mi]);
+        int pd_uid = pd_arm ? ++g_tmp : 0, pd_ren_base = g_nren;
+        Buf pdpre; memset(&pdpre, 0, sizeof pdpre);
         for (int a = 0; a < mnp; a++) {
           buf_puts(&cb, ", ");
+          Buf pa; memset(&pa, 0, sizeof pa);
           const char *pnm = c->scopes[mi].pnames ? c->scopes[mi].pnames[a] : NULL;
+          do {
+
+
           /* a **kwrest param collects the keywords no declared keyword param
              consumed (#3268) */
           if (kwh >= 0 && a == c->scopes[mi].kwrest_idx) {
             LocalVar *krp = pnm ? scope_local(&c->scopes[mi], pnm) : NULL;
             int kh2 = ++g_tmp;
-            if (krp && krp->type == TY_POLY) buf_puts(&cb, "sp_box_obj(");
-            buf_printf(&cb, "({ sp_SymPolyHash *_t%d = sp_SymPolyHash_new(); SP_GC_ROOT(_t%d);", kh2, kh2);
+            if (krp && krp->type == TY_POLY) buf_puts(&pa, "sp_box_obj(");
+            buf_printf(&pa, "({ sp_SymPolyHash *_t%d = sp_SymPolyHash_new(); SP_GC_ROOT(_t%d);", kh2, kh2);
             for (int e = 0; e < kwn; e++) {
               int key = nt_ref(nt, kwels[e], "key");
               const char *kn = key >= 0 ? nt_str(nt, key, "value") : NULL;
@@ -6074,12 +6089,12 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
               Buf eb; memset(&eb, 0, sizeof eb);
               if (kwty[e] == TY_POLY) buf_puts(&eb, tn);
               else emit_boxed_text(c, kwty[e], tn, &eb);
-              buf_printf(&cb, " sp_SymPolyHash_set(_t%d, (sp_sym)%d, %s);", kh2,
+              buf_printf(&pa, " sp_SymPolyHash_set(_t%d, (sp_sym)%d, %s);", kh2,
                          comp_sym_intern(c, kn), eb.p ? eb.p : "sp_box_nil()");
               free(eb.p);
             }
-            buf_printf(&cb, " _t%d; })", kh2);
-            if (krp && krp->type == TY_POLY) buf_puts(&cb, ", SP_BUILTIN_SYM_POLY_HASH)");
+            buf_printf(&pa, " _t%d; })", kh2);
+            if (krp && krp->type == TY_POLY) buf_puts(&pa, ", SP_BUILTIN_SYM_POLY_HASH)");
             continue;
           }
           /* a declared keyword param binds by NAME from the split-off keyword
@@ -6097,13 +6112,13 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
               if (kpv) kpt = kpv->type;
               TyKind at = kwty[e_found];
               char tn[32]; snprintf(tn, sizeof tn, "_t%d", kwtmp[e_found]);
-              if (kpt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, &cb);
-              else if (at == TY_POLY && kpt != TY_POLY && kpt != TY_UNKNOWN) emit_unbox_text(c, kpt, tn, &cb);
-              else { emit_obj_upcast_prefix(c, kpt, at, &cb); buf_puts(&cb, tn); }
+              if (kpt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, &pa);
+              else if (at == TY_POLY && kpt != TY_POLY && kpt != TY_UNKNOWN) emit_unbox_text(c, kpt, tn, &pa);
+              else { emit_obj_upcast_prefix(c, kpt, at, &pa); buf_puts(&pa, tn); }
             }
             else {
               g_self = selfpbuf2;
-              emit_arg_or_default(c, &c->scopes[mi], a, -1, &cb);
+              emit_arg_or_default(c, &c->scopes[mi], a, -1, &pa);
               g_self = saved_self;
             }
             continue;
@@ -6114,13 +6129,13 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
              poly-dispatch arm (issue #2457). */
           if (r_idx >= 0 && a == r_idx) {
             int rt2 = ++g_tmp;
-            buf_printf(&cb, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", rt2, rt2);
+            buf_printf(&pa, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", rt2, rt2);
             for (int a2 = a; a2 < rest_end && a2 < pos_argc; a2++) {
               char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[a2]);
               Buf eb; memset(&eb, 0, sizeof eb);
               if (atmp_ty[a2] == TY_POLY) buf_puts(&eb, tn);
               else emit_boxed_text(c, atmp_ty[a2], tn, &eb);
-              buf_printf(&cb, " sp_PolyArray_push(_t%d, %s);", rt2, eb.p ? eb.p : "sp_box_nil()");
+              buf_printf(&pa, " sp_PolyArray_push(_t%d, %s);", rt2, eb.p ? eb.p : "sp_box_nil()");
               free(eb.p);
             }
             /* An unconsumed keyword hash degrades to one positional hash at
@@ -6133,7 +6148,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             if (rest_kwh_tail(c, &c->scopes[mi], kwh, pos_argc) >= 0) {
               {
                 int kh3 = ++g_tmp;
-                buf_printf(&cb, " sp_PolyArray_push(_t%d, ({ sp_SymPolyHash *_t%d = sp_SymPolyHash_new();"
+                buf_printf(&pa, " sp_PolyArray_push(_t%d, ({ sp_SymPolyHash *_t%d = sp_SymPolyHash_new();"
                                 " SP_GC_ROOT(_t%d);", rt2, kh3, kh3);
                 for (int e = 0; e < kwn; e++) {
                   int key = nt_ref(nt, kwels[e], "key");
@@ -6143,14 +6158,14 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
                   Buf eb; memset(&eb, 0, sizeof eb);
                   if (kwty[e] == TY_POLY) buf_puts(&eb, tn);
                   else emit_boxed_text(c, kwty[e], tn, &eb);
-                  buf_printf(&cb, " sp_SymPolyHash_set(_t%d, (sp_sym)%d, %s);", kh3,
+                  buf_printf(&pa, " sp_SymPolyHash_set(_t%d, (sp_sym)%d, %s);", kh3,
                              comp_sym_intern(c, kn), eb.p ? eb.p : "sp_box_nil()");
                   free(eb.p);
                 }
-                buf_printf(&cb, " sp_box_obj(_t%d, SP_BUILTIN_SYM_POLY_HASH); }));", kh3);
+                buf_printf(&pa, " sp_box_obj(_t%d, SP_BUILTIN_SYM_POLY_HASH); }));", kh3);
               }
             }
-            buf_printf(&cb, " _t%d; })", rt2);
+            buf_printf(&pa, " _t%d; })", rt2);
             continue;
           }
           /* An unconsumed keyword hash collapses into the first unfilled
@@ -6162,9 +6177,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
              rest; a callee with both funds the positional first. */
           if (kwh_positional_slot(c, &c->scopes[mi], kwh, pos_argc) == a) {
             LocalVar *cp = pnm ? scope_local(&c->scopes[mi], pnm) : NULL;
-            if (cp && cp->type == TY_POLY) buf_puts(&cb, "sp_box_obj(");
-            emit_kwh_sym_hash(c, kwn, kwels, kwtmp, kwty, NULL, &cb);
-            if (cp && cp->type == TY_POLY) buf_puts(&cb, ", SP_BUILTIN_SYM_POLY_HASH)");
+            if (cp && cp->type == TY_POLY) buf_puts(&pa, "sp_box_obj(");
+            emit_kwh_sym_hash(c, kwn, kwels, kwtmp, kwty, NULL, &pa);
+            if (cp && cp->type == TY_POLY) buf_puts(&pa, ", SP_BUILTIN_SYM_POLY_HASH)");
             continue;
           }
           /* box the call-site arg if this candidate's parameter is poly;
@@ -6177,19 +6192,43 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           if (src < pos_argc) {
             TyKind at = atmp_ty[src];   /* the temp's actual type (poly for a nil/void arg) */
             char tn[32]; snprintf(tn, sizeof tn, "_t%d", atmp[src]);
-            if (pt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, &cb);
-            else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_text(c, pt, tn, &cb);
+            if (pt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, &pa);
+            else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_text(c, pt, tn, &pa);
             /* a subclass argument into an ancestor-typed parameter: layout-
                compatible, but C wants it spelled (#3418). The unrelated case
                never reaches here -- that arm was dropped above. */
-            else { emit_obj_upcast_prefix(c, pt, at, &cb); buf_puts(&cb, tn); }
+            else { emit_obj_upcast_prefix(c, pt, at, &pa); buf_puts(&pa, tn); }
           }
 else {
             g_self = selfpbuf2;
-            emit_arg_or_default(c, &c->scopes[mi], a, -1, &cb);
+            emit_arg_or_default(c, &c->scopes[mi], a, -1, &pa);
             g_self = saved_self;
           }
+          } while (0);
+          LocalVar *pv9 = pnm ? scope_local(&c->scopes[mi], pnm) : NULL;
+          if (pd_arm && pnm && g_nren < MAX_RENAME) {
+            TyKind pt9 = pv9 ? pv9->type : TY_POLY;
+            if (pt9 == TY_UNKNOWN) pt9 = TY_POLY;
+            if (pv9 && pv9->byref_out) {
+              buf_printf(&pdpre, "const char **_cell__pd%d_%d = %s; ", pd_uid, a, pa.p ? pa.p : "NULL");
+              buf_printf(&cb, "_cell__pd%d_%d", pd_uid, a);
+            }
+            else {
+              emit_ctype(c, pt9, &pdpre);
+              buf_printf(&pdpre, " lv__pd%d_%d = %s; ", pd_uid, a, pa.p ? pa.p : default_value(pt9));
+              if (needs_root(pt9))
+                buf_printf(&pdpre, pt9 == TY_POLY ? "SP_GC_ROOT_RBVAL(lv__pd%d_%d); " : "SP_GC_ROOT(lv__pd%d_%d); ", pd_uid, a);
+              buf_printf(&cb, "lv__pd%d_%d", pd_uid, a);
+            }
+            /* registered AFTER the binding so only a LATER default reads it */
+            snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", pnm);
+            snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_pd%d_%d", pd_uid, a);
+            g_nren++;
+          }
+          else buf_puts(&cb, pa.p ? pa.p : "");
+          free(pa.p);
         }
+        g_nren = pd_ren_base;
         g_self = saved_self;
         if (c->scopes[mi].nparams == 0 && c->scopes[mi].blk_param &&
             c->scopes[mi].blk_param[0] && !c->scopes[mi].yields)
@@ -6200,6 +6239,14 @@ else {
         }
         else emit_cmethod_block_arg(c, id, &c->scopes[mi], blk_tmp2, &cb);
         buf_puts(&cb, ")");
+        if (pd_arm) {
+          /* the bindings and the call in one statement expression, so the
+             arm stays a single expression for the boxing below */
+          Buf wb; memset(&wb, 0, sizeof wb);
+          buf_printf(&wb, "({ %s%s; })", pdpre.p ? pdpre.p : "", cb.p ? cb.p : "");
+          free(cb.p); cb = wb;
+        }
+        free(pdpre.p);
         buf_printf(b, " case %d: ", k);
         /* a proc form carries its own inferred return type (#3399) */
         int pf8 = pfi8 >= 0;

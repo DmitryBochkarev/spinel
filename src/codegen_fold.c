@@ -7320,7 +7320,7 @@ static int subtree_reads_local(const NodeTable *nt, int id, const char *name) {
    Ruby evaluates defaults left-to-right in the callee where earlier params are
    already bound; spinel fills defaults at the call site, where those bindings
    are absent, so such a default needs the sibling-binding path below. */
-static int default_refs_earlier_param(Compiler *c, Scope *m) {
+int default_refs_earlier_param(Compiler *c, Scope *m) {
   const NodeTable *nt = c->nt;
   if (!m->pnames) return 0;
   for (int i = 1; i < m->nparams; i++) {
@@ -8219,6 +8219,18 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
       break;
     }
   }
+  /* A default that reads an earlier parameter (`def g(u, v = u.upcase)`)
+     evaluates in the callee, where that parameter is bound; here it is filled
+     at the call site. emit_args_filled hoists every parameter into a named
+     temp and renames the callee's parameter to it; this path already has the
+     per-parameter temps (_tN), so it aliases each one under the rename's
+     spelling and registers the rename. Without it the default emitted the
+     callee's `lv_u`, which nothing at the call site declared (#4431). Same
+     fixed-arity restriction as the other path. */
+  int pd_ren_base = g_nren, pd_uid = 0;
+  int pd_active = m && splat_tmp_d < 0 && ds_tmp_d < 0 && m->rest_idx < 0 &&
+                  m->kwrest_idx < 0 && default_refs_earlier_param(c, m);
+  if (pd_active) pd_uid = ++g_tmp;
   for (int k = 0; k < np; k++) {
     atmp[k] = ++g_tmp;
     Buf ab; memset(&ab, 0, sizeof ab);
@@ -8356,7 +8368,12 @@ else {
           g_self_deref = comp_ty_value_obj(c, ty_object(cid)) ? "." : "->";
           if (m) g_emitting_class_id = m->class_id;
         }
+        /* a provided argument is the caller's expression: a caller local that
+           happens to share a parameter's name must not resolve to the temp */
+        int pd_nren_sv = g_nren;
+        if (provided >= 0) g_nren = pd_ren_base;
         emit_arg_or_default(c, m, k, provided, &ab);
+        g_nren = pd_nren_sv;
         g_self = saved_self;
         g_self_deref = saved_deref3;
         g_emitting_class_id = saved_emcls2;
@@ -8372,6 +8389,14 @@ else {
         buf_printf(g_pre, " *_t%d = ", atmp[k]);
         buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
         free(ab.p);
+        if (pd_active && m->pnames[k] && g_nren < MAX_RENAME) {
+          /* the lent address under the cell spelling a reading default emits */
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "const char **_cell__pd%d_%d = _t%d;\n", pd_uid, k, atmp[k]);
+          snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", m->pnames[k]);
+          snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_pd%d_%d", pd_uid, k);
+          g_nren++;
+        }
         continue;
       }
       emit_ctype(c, att, g_pre);
@@ -8381,9 +8406,20 @@ else {
          and collect an earlier one still sitting in its temp. */
       if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
       else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }
+      if (pd_active && m->pnames[k] && g_nren < MAX_RENAME) {
+        /* alias the temp (already rooted) under the rename's spelling, and
+           register the rename AFTER it so only a LATER default reads it */
+        emit_indent(g_pre, g_indent);
+        emit_ctype(c, att, g_pre);
+        buf_printf(g_pre, " lv__pd%d_%d = _t%d; (void)lv__pd%d_%d;\n", pd_uid, k, atmp[k], pd_uid, k);
+        snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", m->pnames[k]);
+        snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_pd%d_%d", pd_uid, k);
+        g_nren++;
+      }
     }
     free(ab.p);
   }
+  g_nren = pd_ren_base;   /* the renames served the defaults only */
 
   /* Too few arguments for a rest-parameter target: CRuby's ArgumentError,
      where the body ran with the missing parameters padded out. The raise sits

@@ -745,6 +745,9 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
 int arg_wants_root(Compiler *c, TyKind pt, int provided);
 void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr, Buf *out);
 int arg_slot_for_param(Compiler *c, Scope *m, int idx, int argc);
+/* 1 when a parameter default reads an earlier parameter: it must be evaluated
+   with that parameter bound (see emit_args_filled). */
+int default_refs_earlier_param(Compiler *c, Scope *m);
 int opt_before_required(Scope *m);
 /* `(sp_Parent *)` when an object value flows into an ancestor-typed slot; the
    layouts match by construction, but C needs the cast spelled (#3418). */
