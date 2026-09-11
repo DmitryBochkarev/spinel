@@ -21,6 +21,16 @@ module URI
 
   class Generic
     attr_reader :scheme, :userinfo, :host, :port, :path, :query, :fragment
+    # The component writers CRuby's Generic has: a parsed URI is edited
+    # in place and re-serialised with #to_s (`uri.host = "fxtwitter.com"`
+    # is how a Rails app swaps a domain). Assignment only -- CRuby also
+    # validates the new component and raises InvalidComponentError on a
+    # bad one, which is absent here the way the rest of the subset is.
+    attr_writer :scheme, :userinfo, :host, :port, :path, :query, :fragment
+
+    def hostname=(value)
+      @host = value
+    end
 
     def initialize(scheme, userinfo, host, port, path, query, fragment)
       @scheme = scheme
@@ -56,7 +66,8 @@ module URI
       s << "#{@scheme}://" unless @scheme.nil? || @scheme.empty?
       s << "#{@userinfo}@" unless @userinfo.nil? || @userinfo.empty?
       s << @host.to_s
-      s << ":#{@port}" if @port != default_port && @port > 0
+      # A cleared port (`uri.port = nil`) is omitted, as CRuby omits it.
+      s << ":#{@port}" if !@port.nil? && @port != default_port && @port > 0
       s << @path.to_s
       s << "?#{@query}" unless @query.nil? || @query.empty?
       s << "##{@fragment}" unless @fragment.nil? || @fragment.empty?

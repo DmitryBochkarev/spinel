@@ -16,3 +16,18 @@ p URI.encode_www_form({"a" => 1, "b" => "x y"})
 p URI.join("https://example.com/a/b", "c").to_s
 p URI.join("https://example.com/a/b", "/z").to_s
 p URI("https://example.com/x") == URI("https://example.com/x")
+w = URI("https://twitter.com/user/status/1?x=1")
+w.host = "fxtwitter.com"
+p w.to_s
+w.path = "/other"
+w.query = nil
+w.port = 8443
+w.scheme = "http"
+w.fragment = "f"
+p w.to_s
+w.hostname = "example.org"
+p [w.host, w.hostname]
+w.port = nil
+p w.to_s
+w.userinfo = "me:pw"
+p w.to_s
