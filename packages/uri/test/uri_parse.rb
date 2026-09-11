@@ -27,3 +27,7 @@ w.fragment = "f"
 p w.to_s
 w.hostname = "example.org"
 p [w.host, w.hostname]
+w.port = nil
+p w.to_s
+w.userinfo = "me:pw"
+p w.to_s

@@ -66,7 +66,8 @@ module URI
       s << "#{@scheme}://" unless @scheme.nil? || @scheme.empty?
       s << "#{@userinfo}@" unless @userinfo.nil? || @userinfo.empty?
       s << @host.to_s
-      s << ":#{@port}" if @port != default_port && @port > 0
+      # A cleared port (`uri.port = nil`) is omitted, as CRuby omits it.
+      s << ":#{@port}" if !@port.nil? && @port != default_port && @port > 0
       s << @path.to_s
       s << "?#{@query}" unless @query.nil? || @query.empty?
       s << "##{@fragment}" unless @fragment.nil? || @fragment.empty?

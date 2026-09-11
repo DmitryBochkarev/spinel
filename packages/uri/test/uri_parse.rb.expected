@@ -13,3 +13,5 @@ true
 "https://fxtwitter.com/user/status/1?x=1"
 "http://fxtwitter.com:8443/other#f"
 ["example.org", "example.org"]
+"http://example.org/other#f"
+"http://me:pw@example.org/other#f"
