@@ -6784,6 +6784,7 @@ static void sp_poly_warn_line(sp_RbVal v, FILE *f) {
 }
 
 static sp_StrPolyHash *sp_StrPolyHash_from_poly(sp_RbVal src) {
+  SP_GC_ROOT_RBVAL(src);   /* the source hash is a boxed temporary: the sets below allocate, and nothing else holds it */
   sp_StrPolyHash *h = sp_StrPolyHash_new(); SP_GC_ROOT(h);
   sp_int n = sp_poly_arr_len_ex(src);
   for (sp_int i = 0; i < n; i++) {
@@ -6794,6 +6795,7 @@ static sp_StrPolyHash *sp_StrPolyHash_from_poly(sp_RbVal src) {
   return h;
 }
 static sp_SymPolyHash *sp_SymPolyHash_from_poly(sp_RbVal src) {
+  SP_GC_ROOT_RBVAL(src);   /* the source hash is a boxed temporary: the sets below allocate, and nothing else holds it */
   sp_SymPolyHash *h = sp_SymPolyHash_new(); SP_GC_ROOT(h);
   sp_int n = sp_poly_arr_len_ex(src);
   for (sp_int i = 0; i < n; i++) {
@@ -6804,6 +6806,7 @@ static sp_SymPolyHash *sp_SymPolyHash_from_poly(sp_RbVal src) {
   return h;
 }
 static sp_PolyPolyHash *sp_PolyPolyHash_from_poly(sp_RbVal src) {
+  SP_GC_ROOT_RBVAL(src);   /* the source hash is a boxed temporary: the sets below allocate, and nothing else holds it */
   sp_PolyPolyHash *h = sp_PolyPolyHash_new(); SP_GC_ROOT(h);
   sp_int n = sp_poly_arr_len_ex(src);
   for (sp_int i = 0; i < n; i++) {
@@ -6849,6 +6852,7 @@ static sp_PolyPolyHash *sp_poly_as_poly_poly_hash(sp_RbVal v) {
 static sp_IntArray *sp_poly_as_int_array(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_INT_ARRAY) return (sp_IntArray *)v.v.p;
   if (v.tag == SP_TAG_NIL || !sp_poly_is_array_kind(v.cls_id)) return (sp_IntArray *)0;
+  SP_GC_ROOT_RBVAL(v);   /* the source array is a boxed temporary; the converting pushes allocate */
   sp_IntArray *a = sp_IntArray_new(); SP_GC_ROOT(a);
   sp_int n = sp_poly_length(v);
   for (sp_int i = 0; i < n; i++) sp_IntArray_push(a, sp_poly_as_int_or_nil(sp_poly_arr_get(v, i)));
@@ -6857,6 +6861,7 @@ static sp_IntArray *sp_poly_as_int_array(sp_RbVal v) {
 static sp_FloatArray *sp_poly_as_float_array(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLT_ARRAY) return (sp_FloatArray *)v.v.p;
   if (v.tag == SP_TAG_NIL || !sp_poly_is_array_kind(v.cls_id)) return (sp_FloatArray *)0;
+  SP_GC_ROOT_RBVAL(v);   /* the source array is a boxed temporary; the converting pushes allocate */
   sp_FloatArray *a = sp_FloatArray_new(); SP_GC_ROOT(a);
   sp_int n = sp_poly_length(v);
   for (sp_int i = 0; i < n; i++) {
@@ -6868,6 +6873,7 @@ static sp_FloatArray *sp_poly_as_float_array(sp_RbVal v) {
 static sp_StrArray *sp_poly_as_str_array(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_ARRAY) return (sp_StrArray *)v.v.p;
   if (v.tag == SP_TAG_NIL || !sp_poly_is_array_kind(v.cls_id)) return (sp_StrArray *)0;
+  SP_GC_ROOT_RBVAL(v);   /* the source array is a boxed temporary; the converting pushes allocate */
   sp_StrArray *a = sp_StrArray_new(); SP_GC_ROOT(a);
   sp_int n = sp_poly_length(v);
   for (sp_int i = 0; i < n; i++) {
