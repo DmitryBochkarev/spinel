@@ -39,6 +39,7 @@ void (*sp_gc_mark_suspended_fibers_hook)(void) = NULL;
 void (*sp_gc_mark_globals_hook)(void) = NULL;
 void (*sp_gc_str_sweep_hook)(void) = NULL;
 int (*sp_gc_str_major_due_hook)(void) = NULL;
+int sp_gc_root_phase = 0;   /* the mark is walking the C roots (see sp_gc_mark_all) */
 const char *(*sp_sym_name_fn)(sp_sym) = NULL;
 int (*sp_json_kind_fn)(sp_RbVal) = NULL;
 sp_int (*sp_json_len_fn)(sp_RbVal) = NULL;
@@ -84,6 +85,11 @@ static size_t sp_gc_vsnap_n = 0, sp_gc_vsnap_cap = 0;
 static size_t sp_gc_max_bytes = 0;
 static int sp_gc_max_bytes_init = 0;
 #define SP_GC_FULL_INTERVAL 8
+#define SP_GC_FULL_INTERVAL_MIN 1   /* the adaptive floor under the minor mark: every cycle full */
+#define SP_GC_PROMOTED_DEAD_CUT (1.0/16.0)   /* dead-at-full per minor, as a share of the live set */
+static int sp_gc_minors_since_full = 0;
+static double sp_gc_last_per_minor = 0;
+static int sp_gc_fulls_at_min = 0;
 
 /* Major-collection cadence. A compile-time constant until the measurements in
    docs/internals/gc-string-minor-design.md showed it is where essentially all
@@ -100,7 +106,7 @@ static int sp_gc_full_interval = SP_GC_FULL_INTERVAL;
    the interval's own correction is gated behind the full cycle it is
    postponing (#4076). A heap that really is live never trips this, because old
    stays where the last sweep left it. */
-static size_t sp_gc_old_live = 0;
+size_t sp_gc_old_live = 0;   /* what the last full found live in the old generation */
 #define SP_GC_OLD_GROWTH_SLACK (4u * 1024u * 1024u)
 static int sp_gc_full_interval_fixed = 0;   /* SPINEL_GC_FULL_INTERVAL pins it */
 int sp_gc_full_runs = 0;    /* read by GC.stat (lib/sp_cold.c) */
@@ -188,6 +194,7 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
        on and is clean without it, which is a missed barrier by construction.
        SPINEL_GC_MINOR=1 turns it on. */
     const char *mn=getenv("SPINEL_GC_MINOR"); sp_gc_minor_on=(mn&&*mn&&*mn!='0');
+    const char *ag=getenv("SPINEL_GC_AGE"); if(ag&&*ag) sp_gc_age_on=(*ag!='0');
     if(sp_gc_verify_gen) sp_gc_minor_on=1; }
   /* Read here rather than in sp_alloc_worker_tune, which a single-threaded
      program never calls: the budget policy is not a threads-only question. */
@@ -227,7 +234,7 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
  * the static header-bearing table (the 1-byte binary substrings): nothing
  * before it is an sp_gc_hdr, so reaching for one and calling its scan hook
  * jumps into the payload byte. */
-void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_ct_marked++;/* plain: the mark runs on the collector alone, only the SWEEP is parallel */if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
+void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if(pm==0xfe){((char*)obj)[-1]=(char)0xfc;return;}if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(sp_gc_young_probe_on){if(!h->old)sp_gc_young_probe_hit=1;return;}if(sp_gc_root_phase&&!h->old)h->aged=1;if(h->marked==sp_gc_mark_gen)return;if(sp_gc_minor&&h->old)return;h->marked=sp_gc_mark_gen;sp_gc_ct_marked++;/* plain: the mark runs on the collector alone, only the SWEEP is parallel */if(h->scan){if(sp_gc_mark_stack&&sp_gc_mark_top>=sp_gc_mark_cap&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
 if(sp_gc_mark_stack&&sp_gc_mark_top<sp_gc_mark_cap){sp_gc_mark_stack[sp_gc_mark_top++]=obj;}
 else{h->scan(obj);}}}
 
@@ -250,10 +257,21 @@ static double sp_gc_stat_now(void);
 
 void sp_gc_mark_all(void){if(!sp_gc_mark_stack){sp_gc_mark_stack=(void**)malloc(sizeof(void*)*SP_GC_MARK_STACK_MAX);if(sp_gc_mark_stack)sp_gc_mark_cap=SP_GC_MARK_STACK_MAX;}sp_gc_mark_top=0;if(sp_gc_verify)sp_gc_verify_snapshot();int vd=sp_gc_verify;
   double mk_t = sp_gc_ph_on ? sp_gc_stat_now() : 0.0;
+  /* An object a C root names directly is one some runtime function holds in
+     a local across this collection, and such a function may have recorded
+     its holder BEFORE the allocation that collected (the barrier-then-store
+     shape #4376 describes): the record is cleared by this cycle, and the
+     store that follows would go unrecorded. Promoting every survivor covered
+     that: an old value into an old holder needs no record. Aging survivors
+     reopens it, so what a root names directly is promoted on this survival
+     (aged is set before the mark); the rest of the graph ages. The same for
+     a suspended fiber's roots, which are runtime locals too. */
+  sp_gc_root_phase=1;
   for(int i=0;i<sp_gc_nroots;i++){void**e=sp_gc_roots[i];if(vd){sp_gc_dbg_phase="root";sp_gc_dbg_ctx=(void*)e;}if((uintptr_t)e&(uintptr_t)3){sp_gc_mark_root_entry(e);}
 else{void*obj=*e;if(obj)sp_gc_mark(obj);}}
   SP_GC_MK_PH(sp_gc_ph_mk_roots);
   if(vd)sp_gc_dbg_phase="fibers";if(sp_gc_mark_suspended_fibers_hook)sp_gc_mark_suspended_fibers_hook();
+  sp_gc_root_phase=0;
   SP_GC_MK_PH(sp_gc_ph_mk_fibers);
   if(vd)sp_gc_dbg_phase="globals";if(sp_gc_mark_globals_hook)sp_gc_mark_globals_hook();
   SP_GC_MK_PH(sp_gc_ph_mk_globals);
@@ -270,6 +288,16 @@ int sp_gc_minor_on = 0;
 int sp_gc_verify_gen = 0;
 int sp_gc_verify_gen_fail = 0;
 int sp_gc_verify_probe_on = 0, sp_gc_verify_probe_hit = 0;
+/* Armed after a minor's sweep to ask each remembered holder whether it still
+   reaches a young object (one the sweep kept young for a second look): with the
+   probe on, sp_gc_mark records the answer and marks nothing. */
+int sp_gc_young_probe_on = 0, sp_gc_young_probe_hit = 0;
+/* This cycle's sweeps age survivors instead of promoting every one: a minor
+   whose remembered set is intact. SPINEL_GC_AGE=0 turns aging off. */
+int sp_gc_age_survivors = 0;
+int sp_gc_age_on = 0;
+size_t sp_gc_young_kept_bytes = 0;
+size_t sp_gc_npromoted = 0;
 unsigned sp_gc_verify_probe = 0;
 void *sp_gc_remembered[SP_GC_REMEMBERED_MAX];
 int sp_gc_nremembered = 0;
@@ -386,9 +414,13 @@ void (*sp_gc_obj_retune_hook)(size_t before) = NULL;
    code rather than of a program's allocation sizes. */
 size_t sp_gc_ct_swept = 0, sp_gc_ct_marked = 0;
 static void sp_gc_sweep_young(sp_gc_hdr **pp){
+  size_t kept=0, promoted=0;
   while(*pp){sp_gc_hdr*h=*pp;SP_GC_CTR_ADD(sp_gc_ct_swept,1);if(h->marked!=sp_gc_mark_gen){*pp=h->next;if(h->recycle){h->recycle(h);}
   else{if(h->finalize)h->finalize((char*)h+sizeof(sp_gc_hdr));free(h);}}
-  else{*pp=h->next;h->next=sp_gc_old_heap;sp_gc_old_heap=h;h->old=1;sp_gc_old_bytes+=h->size;sp_gc_bytes+=h->size;}}
+  else if(sp_gc_age_survivors&&!h->aged){h->aged=1;kept+=h->size;pp=&h->next;}   /* first survival: stays young */
+  else{*pp=h->next;h->next=sp_gc_old_heap;sp_gc_old_heap=h;h->old=1;sp_gc_old_bytes+=h->size;sp_gc_bytes+=h->size;promoted++;}}
+  sp_gc_young_kept_bytes+=kept;
+  sp_gc_npromoted+=promoted;
 }
 #ifdef SP_THREADS
 /* One worker's young list, swept BY THAT WORKER while it is parked at the
@@ -412,23 +444,29 @@ void sp_gc_sweep_slot(int wid, sp_gc_hdr **out_head, sp_gc_hdr **out_tail, size_
      scripts/tsan-run.sh) -- and the atomic that would fix it in place is a
      locked add per slot on one shared cache line, which is the same
      ping-pong the parallel sweep exists to avoid. */
-  size_t swept = 0;
+  size_t swept = 0, kept = 0, promoted = 0;
   while (*pp) {
     sp_gc_hdr *h = *pp;
     swept++;
-    *pp = h->next;
     if (h->marked != sp_gc_mark_gen) {
+      *pp = h->next;
       if (h->recycle) { h->recycle(h); }
       else { if (h->finalize) h->finalize((char *)h + sizeof(sp_gc_hdr)); free(h); }
     }
+    else if (sp_gc_age_survivors && !h->aged) {
+      h->aged = 1; kept += h->size; pp = &h->next;   /* first survival: stays young */
+    }
     else {
+      *pp = h->next;
       h->next = head; head = h;
       if (!tail) tail = h;
       h->old = 1;                 /* survivor: joins the old list (see sp_gc_wb) */
-      live += h->size;
+      live += h->size; promoted++;
     }
   }
   SP_GC_CTR_ADD(sp_gc_ct_swept, swept);
+  SP_GC_CTR_ADD(sp_gc_young_kept_bytes, kept);
+  SP_GC_CTR_ADD(sp_gc_npromoted, promoted);
   *out_head = head; *out_tail = tail; *out_bytes = live;
 }
 /* Installed by the scheduler when it can drive the parked workers; NULL means
@@ -469,9 +507,28 @@ static SP_NOINLINE void sp_gc_verify_gen_run(void) {
           cand[n++]=h; }
 #endif
     }
-    sp_gc_mark_gen = (sp_gc_mark_gen + 1) & 0x1fffffffu;
+    sp_gc_mark_gen = (sp_gc_mark_gen + 1) & 0x7ffffffu;
     if(!sp_gc_mark_gen) sp_gc_mark_gen = 1;
     sp_gc_mark_all();
+    /* The sweep that follows uses THIS mark, so it has to keep everything the
+       minor's would have kept, or the check changes what the program sees. A
+       minor takes every recorded holder as a root -- a dead old object on the
+       set still keeps its young referents alive until a full cycle -- and the
+       whole-heap walk above does not. With survivors now aged rather than
+       promoted, a referent the precise walk dropped stayed reachable from its
+       (dead, still recorded) holder, which the next minor walked into freed
+       memory. Walking the set here keeps the two marks equivalent; it hides
+       no miss, since a candidate reached through a RECORDED holder was reached
+       by the minor and is not a candidate. */
+    for(int ri=0;ri<sp_gc_nremembered;ri++){
+      sp_gc_hdr *rh=(sp_gc_hdr*)sp_gc_remembered[ri]-1;
+      if(rh->scan) rh->scan(sp_gc_remembered[ri]);
+    }
+    for(int pi=0;pi<sp_gc_npinned;pi++){
+      sp_gc_hdr *ph=(sp_gc_hdr*)sp_gc_pinned[pi]-1;
+      if(ph->scan) ph->scan(sp_gc_pinned[pi]);
+    }
+    sp_gc_mark_drain();
     size_t str_leaked = sp_str_verify_end();
     if(str_leaked){
       fprintf(stderr,"spinel: GC generational check: %zu young STRING(s) reachable only "
@@ -584,10 +641,11 @@ void sp_gc_collect(void){
   if(!full&&sp_gc_minor_on&&!sp_gc_full_interval_fixed&&
      sp_gc_str_major_due_hook&&sp_gc_str_major_due_hook()){ full=1; str_full=1; }
   if(full)sp_gc_full_runs++;
+  if(!full)sp_gc_minors_since_full++;
   /* new mark generation: every object becomes unmarked without touching it.
      On the (30-bit) wrap, clear the whole heap once so no stale stamp can
      alias the reused generation value. */
-  sp_gc_mark_gen=(sp_gc_mark_gen+1)&0x1fffffffu;   /* marked is 29 bits (see sp_gc_hdr) */
+  sp_gc_mark_gen=(sp_gc_mark_gen+1)&0x7ffffffu;   /* marked is 27 bits (see sp_gc_hdr) */
   if(!sp_gc_mark_gen){
     sp_gc_mark_gen=1;
     for(sp_gc_hdr*hh=sp_gc_old_heap;hh;hh=hh->next)hh->marked=0;
@@ -615,15 +673,19 @@ void sp_gc_collect(void){
        minor's marked objects were old, and its time followed the count. */
     for(int ri=0;ri<sp_gc_nremembered;ri++){
       sp_gc_hdr *rh=(sp_gc_hdr*)sp_gc_remembered[ri]-1;
+      if(sp_gc_verify){sp_gc_dbg_phase="remembered";sp_gc_dbg_ctx=sp_gc_remembered[ri];}
       if(rh->scan) rh->scan(sp_gc_remembered[ri]);
     }
     /* and the sticky half: holders whose stores the barrier never sees, so
        there is no cycle in which they are "already recorded" */
     for(int pi=0;pi<sp_gc_npinned;pi++){
       sp_gc_hdr *ph=(sp_gc_hdr*)sp_gc_pinned[pi]-1;
+      if(sp_gc_verify){sp_gc_dbg_phase="pinned";sp_gc_dbg_ctx=sp_gc_pinned[pi];}
       if(ph->scan) ph->scan(sp_gc_pinned[pi]);
     }
+    if(sp_gc_verify){sp_gc_dbg_phase="minor-drain";sp_gc_dbg_ctx=NULL;}
     sp_gc_mark_drain();
+    if(sp_gc_verify){sp_gc_dbg_phase="?";sp_gc_dbg_ctx=NULL;}
   }
   sp_gc_minor = 0;
   /* Verification: re-run the mark whole-heap and compare. Anything the full
@@ -667,6 +729,7 @@ void sp_gc_collect(void){
        interval of 128 a workload that promotes and then drops 20k arrays per
        round peaked at 285 MB against 26 at 8, and ran slower for it. */
     sp_gc_old_live=sp_gc_old_bytes;   /* re-baseline the space bound */
+
     /* The survival ratio is a statement about a sample taken ON SCHEDULE. A
        full forced by growth is not that sample -- it is evidence the cadence
        was already too long for this phase, and reading survival there gets the
@@ -679,12 +742,38 @@ void sp_gc_collect(void){
     else if(old_before>0&&!sp_gc_full_interval_fixed){
       size_t kept=sp_gc_old_bytes;
       if(kept>old_before-(old_before>>2)){            /* >75% survived */
-        if(sp_gc_full_interval<SP_GC_FULL_INTERVAL_MAX) sp_gc_full_interval*=2;
+        /* ...unless the minors between were promoting garbage (below): a
+           high survival at a SHORT cadence is what the short cadence bought */
+        if(sp_gc_full_interval<SP_GC_FULL_INTERVAL_MAX&&sp_gc_last_per_minor<SP_GC_PROMOTED_DEAD_CUT/2) sp_gc_full_interval*=2;
       }
       else if(kept<(old_before>>1)){                  /* <50% survived */
         if(sp_gc_full_interval>SP_GC_FULL_INTERVAL) sp_gc_full_interval/=2;
       }
+      /* Under the minor mark a second reading of the same sample: what the
+         minors between two fulls PROMOTED and this full then freed, per minor,
+         against the live set. A minor is worth its skipped old walk only if
+         what it promotes mostly survives; an interpreter's evaluation frames
+         promoted 13% of the live set per minor and died at the next full,
+         and carrying them was a third of its wall (most of it outside the
+         collector: the heap the mutator ran on had that much dead in it).
+         Above the cut the cadence shortens toward every cycle full, where the
+         minor never runs; below it the survival rule above governs. */
+      if(sp_gc_minor_on&&kept>0&&sp_gc_minors_since_full>0){
+        size_t dead=old_before>kept?old_before-kept:0;
+        double per_minor=(double)dead/(double)kept/(double)sp_gc_minors_since_full;
+        sp_gc_last_per_minor=per_minor;
+        if(per_minor>SP_GC_PROMOTED_DEAD_CUT){
+          if(sp_gc_full_interval>SP_GC_FULL_INTERVAL_MIN) sp_gc_full_interval/=2;
+        }
+        sp_gc_fulls_at_min=0;
+      }
+      else if(sp_gc_minor_on&&sp_gc_full_interval==SP_GC_FULL_INTERVAL_MIN){
+        /* every cycle full measures nothing about minors; try one again now
+           and then, and let the reading above decide */
+        if(++sp_gc_fulls_at_min>=8){ sp_gc_fulls_at_min=0; sp_gc_last_per_minor=0; sp_gc_full_interval=2; }
+      }
     }
+    sp_gc_minors_since_full=0;
   }
   /* minor: the old list is not walked at all -- an old object's stale stamp
      simply reads as unmarked next generation, which is what a fresh unmark
@@ -695,6 +784,14 @@ void sp_gc_collect(void){
      string list on a minor cycle, freeing strings only an old object holds. */
   SP_GC_PH(sp_gc_ph_oldsweep);
   sp_gc_str_minor_only = (sp_gc_str_sweep_hook && !full && sp_gc_minor_on);
+  /* Age survivors only on a minor whose remembered set is intact: a full
+     cycle's old sweep clears every dirty bit and discards the array, so a
+     holder of an object kept young would be forgotten; an overflowed set is
+     cleared by a whole-heap walk for the same reason. On those cycles every
+     survivor promotes, as before. */
+  sp_gc_age_survivors = sp_gc_age_on && sp_gc_minor_on && !full &&
+                        !sp_gc_rem_overflow && !sp_gc_pin_overflow;
+  sp_gc_young_kept_bytes = 0; sp_gc_npromoted = 0;
 #ifdef SP_THREADS
   { int n=sp_active_workers; if(n<1)n=1; if(n>SP_MAX_WORKERS)n=SP_MAX_WORKERS;
     /* Hand each parked worker its own slot. Only with a pool worth the barrier
@@ -717,7 +814,7 @@ void sp_gc_collect(void){
      counter below zero; the retune read the wrapped value and set a threshold
      near SIZE_MAX, which never fires again (#4073). */
   SP_GC_PH(sp_gc_ph_slotsweep);
-  sp_gc_bytes=sp_gc_old_bytes;
+  sp_gc_bytes=sp_gc_old_bytes+SP_GC_CTR_GET(sp_gc_young_kept_bytes);   /* the kept young still occupy the heap */
   /* The remembered set has done its job and starts over after EVERY cycle, not
      only a full one. Every young object it led the mark to has just been
      promoted by the sweep above, so a holder that is not written to again has
@@ -734,6 +831,7 @@ void sp_gc_collect(void){
   if(full){
     /* the old sweep above cleared every survivor; the array may name objects it
        just freed, so it must not be walked here */
+    sp_gc_nremembered=0; sp_gc_rem_overflow=0;
   }
   /* Clear the bits the barrier set, not every bit in the old heap. An object can
      carry the bit with no entry naming it in exactly one case -- sp_gc_wb was
@@ -750,11 +848,68 @@ void sp_gc_collect(void){
      collector time, collector at 65% of wall; campfire from matz/spinel#4352). */
   else if(sp_gc_rem_overflow){
     for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next)h->dirty=0;
+    sp_gc_nremembered=0; sp_gc_rem_overflow=0;
+  }
+  else if(sp_gc_age_survivors){
+    /* The premise of the clear -- every young object the set led the mark to
+       has just been promoted -- no longer holds for the survivors the sweep
+       kept young for a second look. Two kinds of holder reach those now, and
+       both have to be on the set the next minor walks, or it never walks them
+       and frees what they hold.
+
+       An object promoted THIS cycle holding one: the store was young-into-
+       young when it happened, so no barrier saw it, and promotion made it an
+       old-into-young edge nobody recorded. The promotions sit at the head of
+       the old list (every sweep prepends), so those are walked with the young
+       probe armed -- the scan marks nothing and answers only whether a young
+       object is reached -- and recorded when it is. A refused slot sets the
+       overflow flag, which makes the next mark whole-heap.
+
+       A holder already on the set: it stays recorded while it still reaches a
+       young object, and is cleared when it does not. The holders are old and a
+       minor frees no old object, so the array names nothing freed. */
+    sp_gc_rem_overflow=0;
+    sp_gc_young_probe_on=1;
+    { size_t np=sp_gc_npromoted; sp_gc_hdr *h=sp_gc_old_heap;
+      for(size_t k=0;k<np&&h;k++,h=h->next){
+        if(h->dirty||!h->scan) continue;
+        sp_gc_young_probe_hit=0;
+        h->scan((char*)h+sizeof(sp_gc_hdr));
+        if(!sp_gc_young_probe_hit) continue;
+        h->dirty=1;
+        if(sp_gc_nremembered<SP_GC_REMEMBERED_MAX) sp_gc_remembered[sp_gc_nremembered++]=(char*)h+sizeof(sp_gc_hdr);
+        else sp_gc_rem_overflow=1;
+      } }
+    int keep=0;
+    for(int ri=0;ri<sp_gc_nremembered;ri++){
+      void *obj=sp_gc_remembered[ri];
+      sp_gc_hdr *rh=(sp_gc_hdr*)obj-1;
+      sp_gc_young_probe_hit=0;
+      if(rh->scan) rh->scan(obj);
+      if(sp_gc_young_probe_hit) sp_gc_remembered[keep++]=obj;
+      else rh->dirty=0;
+    }
+    sp_gc_young_probe_on=0;
+    sp_gc_nremembered=keep;
   }
   else{
     for(int ri=0;ri<sp_gc_nremembered;ri++)((sp_gc_hdr*)sp_gc_remembered[ri]-1)->dirty=0;
+    sp_gc_nremembered=0;
+    sp_gc_rem_overflow=0;
   }
-  sp_gc_nremembered=0; sp_gc_rem_overflow=0;
+  /* Under SPINEL_GC_VERIFY: the remembered set's invariant, dirty <=> listed,
+     holds for every old object once the array is not overflowed. */
+  if(sp_gc_verify&&!sp_gc_rem_overflow){
+    for(sp_gc_hdr*h=sp_gc_old_heap;h;h=h->next){
+      void *o=(char*)h+sizeof(sp_gc_hdr); int listed=0;
+      for(int ri=0;ri<sp_gc_nremembered;ri++) if(sp_gc_remembered[ri]==o){listed=1;break;}
+      if(!!h->dirty!=listed){
+        fprintf(stderr,"spinel: GC remembered-set invariant broken: obj=%p scan=%p dirty=%d listed=%d full=%d age=%d cycle=%d\n",
+                o,(void*)h->scan,(int)h->dirty,listed,full,sp_gc_age_survivors,sp_gc_cycle);
+        abort();
+      }
+    }
+  }
   SP_GC_PH(sp_gc_ph_rembclear);
   /* Sweep the string heap only when IT is over its trigger: the sweep is a
      full walk of the live string list, and running it on every OBJECT-heap
