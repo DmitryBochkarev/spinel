@@ -935,7 +935,7 @@ static TyKind an_user_read_ty(Compiler *c, const char *name, int argc) {
   for (int k = 0; k < c->nclasses; k++) {
     if (c->classes[k].is_native_class) {
       int nmk = comp_native_method_find(c, k, name, argc, 0);
-      if (nmk >= 0) {
+      if (nmk >= 0 && c->native_methods[nmk].nargs == argc) {
         TyKind nr = sp_streq(c->native_methods[nmk].ret, "self")
                       ? ty_object(k) : native_spec_to_ty(c->native_methods[nmk].ret);
         r = found ? ty_unify(r, nr) : nr; found = 1;
@@ -4556,18 +4556,23 @@ else {
       }
       /* poly method dispatch: unify the return type over every class that
          defines `name` (the runtime cls_id picks the impl). */
-      TyKind r = TY_UNKNOWN; int found = 0;
+      TyKind r = TY_UNKNOWN; int found = 0, nat_found = 0;
       for (int k = 0; k < c->nclasses; k++) {
+        if (an_builtin_only) continue;   /* the builtin answer alone is wanted */
         if (c->classes[k].is_native_class) {
+          /* The lookup's loose fallback answers a same-name binding of ANY
+             arity; one that cannot take this call's arguments is no answer to
+             it. StringIO's zero-argument `getbyte` typed `s.getbyte(i)` on a
+             boxed String as Integer while the emission was the builtin
+             sp_poly_getbyte, whose value is boxed (#4432). */
           int nmk = comp_native_method_find(c, k, name, argc, 0);
-          if (nmk >= 0) {
+          if (nmk >= 0 && c->native_methods[nmk].nargs == argc) {
             TyKind nr = sp_streq(c->native_methods[nmk].ret, "self")
                           ? ty_object(k) : native_spec_to_ty(c->native_methods[nmk].ret);
-            r = found ? ty_unify(r, nr) : nr; found = 1;
+            r = found ? ty_unify(r, nr) : nr; found = 1; nat_found = 1;
           }
           continue;
         }
-        if (an_builtin_only) continue;   /* the builtin answer alone is wanted */
         int mi = comp_method_in_chain(c, k, name, NULL);
         /* A candidate whose own return has not been derived yet contributes
            nothing: "not known yet" is not an answer, and taking it as one is
@@ -4650,7 +4655,7 @@ else {
          for every name, which is the same question an_poly_concrete asks from
          the other side. */
       if (found && !an_builtin_only && r != TY_POLY && r != TY_UNKNOWN &&
-          recv >= 0 && an_user_defines_or_reads(c, name)) {
+          recv >= 0 && (nat_found || an_user_defines_or_reads(c, name))) {
         /* Asking costs a full re-inference of the call, and the same node is
            asked many times inside one fixpoint iteration: counted on a 51k-line
            Rails emit, 294,164 asks over 18k nodes, 96% of them a repeat of a
