@@ -10734,13 +10734,17 @@ int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
         TyKind at = comp_ntype(c, arg);
         emit_indent(b, indent);
         buf_printf(b, "sp_String_append_bin(%s, ", srefC);
-        if (at == TY_INT) { buf_puts(b, "sp_int_codepoint_to_str("); emit_expr(c, arg, b); buf_puts(b, ")"); }
-        else if (at == TY_POLY) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, arg, b); buf_puts(b, ")"); }
-        /* a string-typed arg whose value is really the unresolved-call gate's
-           sp_raise_nomethod(...) poly (`s << time_or_nil.strftime(...)`, the
-           receiver being nilable): emit_str_expr coerces it to the string slot,
-           keeping the raise, instead of passing the sp_RbVal through raw. */
-        else emit_str_expr(c, arg, b);
+        (void)at;
+        /* One rule for what a String append does with its argument, shared with
+           the value-position emitter. This copy had the typed-Integer half and
+           stringified a BOXED one, so `s << b` appended "112" where CRuby
+           appends "p" -- and a single poly-typed call site widens the operand
+           for every caller of the method (#4425). The helper also keeps the
+           string-slot coercion this arm needs: an argument whose value is
+           really the unresolved-call gate's sp_raise_nomethod(...) poly
+           (`s << time_or_nil.strftime(...)`) goes through emit_str_expr, which
+           keeps the raise instead of passing the sp_RbVal through raw. */
+        emit_str_append_arg(c, arg, b);
         buf_puts(b, ");\n");
       }
       return 1;

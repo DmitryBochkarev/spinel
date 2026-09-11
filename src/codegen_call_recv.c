@@ -73,9 +73,24 @@ static void emit_filter_bang_result(const char *name, int trecv, int torig,
 /* String#<< and String#concat take an Integer as a CODEPOINT, not a string:
    `s << 100` appends "d". Sent through the string slot, the integer reached
    sp_str_concat as a char pointer and the program died (#3544). */
-static void emit_str_append_arg(Compiler *c, int arg, Buf *b) {
+void emit_str_append_arg(Compiler *c, int arg, Buf *b) {
   if (comp_ntype(c, arg) == TY_INT) {
     buf_puts(b, "sp_int_codepoint_to_str("); emit_expr(c, arg, b); buf_puts(b, ")");
+    return;
+  }
+  /* A BOXED integer is the same Integer: `s << 112` appends "p" whether or not
+     the operand's type survived to this point. Falling through to the string
+     conversion below made it append the decimal digits instead, silently, and
+     a single poly-typed call site widened the operand for every caller of the
+     method -- so a program printed "112113" where CRuby prints "pq" and nothing
+     in it had changed (#4425). Decided at run time on the tag, because that is
+     where the answer is: the typed arm above is the same rule with the tag
+     known at compile time. */
+  if (comp_ntype(c, arg) == TY_POLY) {
+    int ta = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, arg, b);
+    buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_int_codepoint_to_str(_t%d.v.i)"
+                  " : sp_poly_to_s(_t%d); })", ta, ta, ta);
     return;
   }
   emit_str_expr(c, arg, b);

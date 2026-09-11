@@ -443,6 +443,11 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
    walks parameters looking for keys and so could not see an unclaimed one
    (#4419). */
 int emit_unknown_kwarg_raise(Compiler *c, Scope *m, int kwh);
+/* The argument of a String append (`<<` / `concat`), rendered for the append.
+   An Integer -- typed OR boxed -- is a CODEPOINT, not its decimal digits. Shared
+   because the rule was written twice and the second copy only had the typed half
+   (#4425). */
+void emit_str_append_arg(Compiler *c, int arg, Buf *b);
 int rest_shortfall_required(Compiler *c, Scope *m);
 /* Emit a hash key, unboxing a poly value to the typed-hash's key type. */
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b);
