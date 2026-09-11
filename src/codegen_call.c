@@ -20737,18 +20737,35 @@ else { memcpy(dir, sf, n); dir[n] = 0; } }
       int smi = comp_cmethod_in_chain(c, encl->class_id, name, NULL);
       if (smi >= 0) {
         Scope *ms = &c->scopes[smi];
-        emit_method_cname(c, ms, b);
-        buf_puts(b, "(");
+        Buf cb; memset(&cb, 0, sizeof cb);
+        emit_method_cname(c, ms, &cb);
+        buf_puts(&cb, "(");
         /* a sibling call keeps the receiving class: forward ours when this
            body has one, else the class it is emitted for */
         const char *lead2 = "";
         if (cmethod_takes_self_cls(c, smi)) {
-          if (cmethod_takes_self_cls(c, (int)(encl - c->scopes))) { buf_puts(b, "_sp_cls"); lead2 = ", "; }
-          else lead2 = emit_cmethod_self_cls_arg(c, smi, new_cls, b);
+          if (cmethod_takes_self_cls(c, (int)(encl - c->scopes))) { buf_puts(&cb, "_sp_cls"); lead2 = ", "; }
+          else lead2 = emit_cmethod_self_cls_arg(c, smi, new_cls, &cb);
         }
-        emit_args_filled(c, smi, nt_ref(nt, id, "arguments"), lead2, b);
-        emit_cmethod_block_arg(c, id, ms, -1, b);
-        buf_puts(b, ")");
+        emit_args_filled(c, smi, nt_ref(nt, id, "arguments"), lead2, &cb);
+        emit_cmethod_block_arg(c, id, ms, -1, &cb);
+        buf_puts(&cb, ")");
+        /* The site's slot and the callee's return can disagree: this call is
+           devirtualized to the sibling's own C function, whose return is
+           concrete, while the inference typed the SITE poly -- a `create!`
+           inherited by several STI subclasses unifies to poly across them, and
+           `create!(attrs).tap { }` inside an inlined `transaction { }` then put
+           an sp_Room * straight into an sp_RbVal temp (#4428). The class-method
+           dispatch a few thousand lines up has always boxed this seam; the bare
+           sibling call is the same seam without the switch around it. */
+        TyKind slot_t = comp_ntype(c, id);
+        TyKind kr = (TyKind)ms->ret;
+        if (slot_t == TY_POLY && kr != TY_POLY && kr != TY_UNKNOWN && kr != TY_VOID &&
+            !method_is_void(ms))
+          emit_boxed_text(c, kr, cb.p ? cb.p : "", b);
+        else
+          buf_puts(b, cb.p ? cb.p : "");
+        free(cb.p);
         return;
       }
     }
