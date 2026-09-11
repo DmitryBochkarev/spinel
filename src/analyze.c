@@ -13394,6 +13394,17 @@ void analyze_program(Compiler *c) {
       TyKind *prev = (TyKind *)malloc(sizeof(TyKind) * (nrec > 0 ? nrec : 1));
       TyKind *lprev = (TyKind *)malloc(sizeof(TyKind) * (nlrec > 0 ? nlrec : 1));
       for (int iter = 0; iter < 128; iter++) {
+        /* Parameters bind from the SETTLED state of the previous iteration,
+           before this one's re-clear. Bound after it, a parameter sampled
+           whichever of an ivar's writes had been merged by then: a poly ivar
+           holding an Array on one path and a Relation on another was merged
+           from the Relation write alone when the Array-answering call had not
+           been typed yet that round, the parameter was pinned to Relation, and
+           the later widening never reached it because the next iteration's
+           bind sampled the same partial state. The call site then read the
+           Array's header as a Relation (#4437). One iteration of lag, and the
+           loop's stability test already waits for the ivars to stop moving. */
+        infer_param_types(c);
         /* stash last-settled values, then re-clear the reset ivars so they
            recompute fresh (narrowing) this iteration. */
         for (int k = 0; k < nrec; k++) prev[k] = c->classes[recCi[k]].ivar_types[recIv[k]];
@@ -13403,7 +13414,6 @@ void analyze_program(Compiler *c) {
         sp_narrow_memo_bump();  /* invalidate per-iteration narrow-helper memo */
         int ch = 0;
         ch |= infer_write_types(c);
-        ch |= infer_param_types(c);
         ch |= bind_coerce_operator_params(c);   /* 3 + obj calls obj's op WITH obj */
         ch |= infer_param_hash_value(c);
         ch |= propagate_prep_params(c);
@@ -13438,6 +13448,8 @@ void analyze_program(Compiler *c) {
         }
         else if (!ch) break;
       }
+      /* the bind lags one iteration; take the settled state once more */
+      infer_param_types(c);
       free(prev); free(lprev);
     }
     free(recCi); free(recIv); free(recLs); free(recLi);

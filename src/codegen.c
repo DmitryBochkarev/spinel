@@ -183,7 +183,20 @@ void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b) {
   if (t == TY_STR_POLY_HASH)  { buf_printf(b, "sp_poly_as_str_poly_hash(%s)", expr); return; }
   if (t == TY_SYM_POLY_HASH)  { buf_printf(b, "sp_poly_as_sym_poly_hash(%s)", expr); return; }
   if (t == TY_POLY_POLY_HASH) { buf_printf(b, "sp_poly_as_poly_poly_hash(%s)", expr); return; }
-  if (ty_is_object(t)) { buf_printf(b, "(%s *)(%s).v.p", class_ctype(c, ty_object_class(t)), expr); return; }
+  /* A boxed value read as a class-typed pointer: the tag and class are
+     checked, because the alternative is reading another type's memory through
+     the cast. A poly ivar that held an Array on one path and a Relation on
+     another was passed to a parameter inference had left at Relation, and the
+     Array's header was read as a table name (#4437). nil stays NULL, which is
+     how an object pointer encodes it. */
+  if (ty_is_object(t)) {
+    int oc = ty_object_class(t);
+    const char *rn = class_ruby_name(c, oc);
+    buf_printf(b, "(%s *)sp_poly_unbox_cls(%s, %d, ", class_ctype(c, oc), expr, oc);
+    emit_str_literal(b, rn ? rn : c->classes[oc].name);
+    buf_puts(b, ")");
+    return;
+  }
   const char *cn = c_type_name(t);
   if (cn) buf_printf(b, "(%s)(%s).v.p", cn, expr);
   else buf_printf(b, "(%s).v.i", expr);
@@ -7914,6 +7927,7 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "static sp_File *sp_user_to_io_dispatch(sp_RbVal v);\n");
   if (g_needs_class_machinery)
     buf_puts(b, "static int sp_poly_is_a(sp_RbVal obj, sp_Class klass);\n");
+  buf_puts(b, "static void *sp_poly_unbox_cls(sp_RbVal v, int cls, const char *want);\n");
   if (g_gen_obj_hash)
     buf_puts(b, "static sp_RbVal sp_obj_to_hash(sp_RbVal v);\n");
   if (g_gen_obj_to_json)
@@ -9724,6 +9738,12 @@ char *codegen_program(const NodeTable *nt) {
   buf_puts(&b, "static int sp_class_le(sp_Class a,sp_Class b){return sp_class_is_ancestor(b,a);}\n");
   buf_puts(&b, "static int sp_class_gt(sp_Class a,sp_Class b){return sp_class_lt(b,a);}\n");
   buf_puts(&b, "static int sp_class_ge(sp_Class a,sp_Class b){return sp_class_le(b,a);}\n");
+  /* The checked unbox emit_unbox_text uses for class-typed slots (#4437). */
+  buf_puts(&b, "static void *sp_poly_unbox_cls(sp_RbVal v, int cls, const char *want){\n"
+               "  if(v.tag==SP_TAG_NIL)return NULL;\n"
+               "  if(v.tag==SP_TAG_OBJ&&sp_class_le((sp_Class){v.cls_id},(sp_Class){cls}))return v.v.p;\n"
+               "  sp_raise_cls(\"TypeError\", sp_sprintf(\"wrong argument type %s (expected %s)\", sp_poly_class_name(v), want));\n"
+               "  return NULL;\n}\n");
   /* Tri-state class ordering: CRuby's Class#< / <= / > / >= / <=> answer nil
      for two classes with no subclass relationship (not false / not raising).
      Macros so `sp_class_le` resolves at the call site to whichever version is
