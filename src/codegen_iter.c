@@ -69,6 +69,10 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   int recv = nt_ref(nt, id, "receiver");
   if (!name) return 0;
   int mi, recv_class = -1;
+  /* the class a CLASS METHOD is inlined for: no instance self to bind (which
+     is what recv_class drives), but its body's bare `new` must still build
+     this class rather than the host method's */
+  int cm_class = -1;
   int implicit_self = 0;
   if (recv < 0) {
     mi = comp_method_index(c, name);     /* free function */
@@ -99,6 +103,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     if (ci >= 0) {
       /* Cls.method with a yield block: look up as a class method */
       mi = comp_cmethod_in_chain(c, ci, name, NULL);
+      cm_class = ci;
     }
     else if (ty_is_object(rt)) {
       /* An instance receiver -- including a constant that holds an instance
@@ -213,6 +218,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
      shared static would be clobbered by the nested inline, so the outer frame's
      ensure/trailing-self would emit the inner receiver temp (undeclared here). */
   char selfbuf[64];
+  char cm_selfbuf[32];   /* the class token an inlined class method's self names */
   /* Nested `yield` inside the block body should chain to the block that was
      active before this inline, not to the inner block. */
   g_yield_block_fallback = saved_block;
@@ -436,6 +442,21 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     g_self_deref = recv_self_deref;
   }
   if (recv_class >= 0) g_emitting_class_id = recv_class;
+  /* A class method's body inlined into another class's method: its bare `new`
+     asks g_emitting_class_id, which was still the HOST's. `Http.start { }`
+     from `Fetch#go` built a Fetch -- clang refused on the pointer type, and two
+     layout-compatible classes would have got the wrong object silently
+     (#4430). The instance branch above has always set this; the class-method
+     branch set only `mi`. */
+  else if (cm_class >= 0) {
+    g_emitting_class_id = cm_class;
+    /* and `self` in that body is the CLASS, the way the method's own function
+       spells it -- not the host's instance. `yield self.new` from the same
+       shape was refused as `initializing 'sp_Class' with 'sp_Fetch *'`. */
+    snprintf(cm_selfbuf, sizeof cm_selfbuf, "((sp_Class){%d})", cm_class);
+    g_self = cm_selfbuf;
+    g_self_deref = NULL;
+  }
 
   /* per-inline return funnel (stack storage: the inliner recurses, and the
      saved outer label pointer must stay valid across a nested inline). */
