@@ -452,7 +452,11 @@ described above.
 
 **What a pack cannot carry.** A package that binds a system library -- openssl,
 sqlite -- names it with `-l` in the Makefile and expects it on the recipient's
-machine. Those packs need a C compiler, `make`, and that library.
+machine. Those packs need a C compiler, `make`, and that library. One library
+is the recipient's platform's to name rather than the packer's: `String#crypt`
+is libc `crypt(3)`, a separate `-lcrypt` on glibc and part of libSystem on
+Darwin, and the Makefile decides that from `uname` where it runs, so a pack
+made on a Mac links on Linux and the other way round.
 
 ## Rebuilds
 
