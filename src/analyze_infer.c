@@ -4455,7 +4455,7 @@ else {
            sp_streq(name, "lstrip") || sp_streq(name, "rstrip") ||
            sp_streq(name, "to_str") || sp_streq(name, "ascii_only?") ||
            sp_streq(name, "valid_encoding?") || sp_streq(name, "encode") ||
-           sp_streq(name, "scrub")))
+           sp_streq(name, "scrub") || sp_streq(name, "b")))
         return an_poly_concrete(c, name, TY_POLY);
       /* ...and the same names where they take arguments. unpack answers a
          boxed array, byteslice a boxed String or nil; the codegen arm for
@@ -4463,7 +4463,8 @@ else {
       if ((sp_streq(name, "unpack") && argc == 1) ||
           (sp_streq(name, "byteslice") && (argc == 1 || argc == 2)) ||
           (sp_streq(name, "scrub") && argc == 1) ||
-          (sp_streq(name, "encode") && argc >= 1 && argc <= 3))
+          (sp_streq(name, "encode") && argc >= 1 && argc <= 3) ||
+          ((sp_streq(name, "force_encoding") || sp_streq(name, "encode!")) && argc >= 1 && argc <= 2))
         return an_poly_concrete(c, name, TY_POLY);
       /* chomp / chop / delete_prefix / delete_suffix answer a String and are
          served at argc 0 only, so the separator forms -- `line.chomp("|")`,

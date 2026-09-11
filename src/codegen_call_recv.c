@@ -5,6 +5,7 @@
 #include "codegen_internal.h"
 
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b);
+static void emit_str_force_encoding(Compiler *c, const char *r, const int *argv, int argc, Buf *b);
 
 /* Object's identity protocol, text form (defined with its node form at the end of this file). */
 static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKind rt, const char *r, TyKind at, const char *a, Buf *b);
@@ -7400,36 +7401,8 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
          raises, as CRuby checks before the (empty) append (#3339). */
       else if ((sp_streq(name, "concat") || sp_streq(name, "prepend")) && argc == 0)
         buf_printf(b, "(sp_str_check_mutable(%s), (%s))", r, r);
-      else if ((sp_streq(name, "force_encoding") || sp_streq(name, "encode!")) && argc <= 2) {
-        /* The argument was ignored entirely, so `force_encoding("ASCII-8BIT")`
-           left the string naming UTF-8 -- and spinel's one tag is exactly what
-           that argument asks for. A constant path (Encoding::BINARY) or a
-           string literal both name it; anything else keeps today's no-op,
-           since spinel has no third encoding to move to. */
-        const char *fe_nm = NULL;
-        if (argc >= 1) {
-          const char *at = nt_type(nt, argv[0]);
-          if (at && sp_streq(at, "ConstantPathNode")) fe_nm = nt_str(nt, argv[0], "name");
-          else if (at && sp_streq(at, "StringNode")) {
-            fe_nm = nt_str(nt, argv[0], "unescaped");
-            if (!fe_nm) fe_nm = nt_str(nt, argv[0], "content");
-          }
-        }
-        int fe_bin = 0, fe_txt = 0;
-        if (fe_nm) {
-          char fe_up[32]; size_t fl = 0;
-          for (; fe_nm[fl] && fl < sizeof fe_up - 1; fl++) {
-            char ch = fe_nm[fl];
-            fe_up[fl] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 32) : (ch == '_' ? '-' : ch);
-          }
-          fe_up[fl] = 0;
-          fe_bin = sp_streq(fe_up, "ASCII-8BIT") || sp_streq(fe_up, "BINARY");
-          fe_txt = sp_streq(fe_up, "UTF-8");
-        }
-        if (fe_bin) buf_printf(b, "(sp_str_check_mutable(%s), sp_str_as_binary(%s))", r, r);
-        else if (fe_txt) buf_printf(b, "(sp_str_check_mutable(%s), sp_str_as_text(%s))", r, r);
-        else buf_printf(b, "(sp_str_check_mutable(%s), (%s))", r, r);
-      }
+      else if ((sp_streq(name, "force_encoding") || sp_streq(name, "encode!")) && argc <= 2)
+        emit_str_force_encoding(c, r, argv, argc, b);
       else if ((sp_streq(name, "=~") || sp_streq(name, "!~")) && argc == 1 &&
                comp_ntype(c, argv[0]) == TY_STRING) {
         /* `str =~ str` is a TypeError in CRuby, not a missing method: only a
@@ -10177,6 +10150,39 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
    and source (a name or an Encoding) and the three keywords travel boxed, and
    the runtime decides the pair. `recv_txt` is the receiver's `const char *`
    expression. */
+
+/* String#force_encoding / #encode! on `recv_txt`, a `const char *` expression.
+   The argument was once ignored entirely, so `force_encoding("ASCII-8BIT")`
+   left the string naming UTF-8 -- and spinel's one tag is exactly what that
+   argument asks for. A constant path (Encoding::BINARY) or a string literal
+   both name it; anything else keeps the no-op, since spinel has no third
+   encoding to move to. */
+static void emit_str_force_encoding(Compiler *c, const char *r, const int *argv, int argc, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *fe_nm = NULL;
+  if (argc >= 1) {
+    const char *at = nt_type(nt, argv[0]);
+    if (at && sp_streq(at, "ConstantPathNode")) fe_nm = nt_str(nt, argv[0], "name");
+    else if (at && sp_streq(at, "StringNode")) {
+      fe_nm = nt_str(nt, argv[0], "unescaped");
+      if (!fe_nm) fe_nm = nt_str(nt, argv[0], "content");
+    }
+  }
+  int fe_bin = 0, fe_txt = 0;
+  if (fe_nm) {
+    char fe_up[32]; size_t fl = 0;
+    for (; fe_nm[fl] && fl < sizeof fe_up - 1; fl++) {
+      char ch = fe_nm[fl];
+      fe_up[fl] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 32) : (ch == '_' ? '-' : ch);
+    }
+    fe_up[fl] = 0;
+    fe_bin = sp_streq(fe_up, "ASCII-8BIT") || sp_streq(fe_up, "BINARY");
+    fe_txt = sp_streq(fe_up, "UTF-8");
+  }
+  if (fe_bin) buf_printf(b, "(sp_str_check_mutable(%s), sp_str_as_binary(%s))", r, r);
+  else if (fe_txt) buf_printf(b, "(sp_str_check_mutable(%s), sp_str_as_text(%s))", r, r);
+  else buf_printf(b, "(sp_str_check_mutable(%s), (%s))", r, r);
+}
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b) {
   const NodeTable *nt = c->nt;
   int kwh = -1, pos = argc;
@@ -12832,6 +12838,9 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     if (sp_streq(name, "encode") && argc == 0) {
       buf_puts(b, "sp_box_str(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"encode\"))"); return 1;
     }
+    if (sp_streq(name, "b") && argc == 0) {   /* a binary copy, as the String arm answers (#4441) */
+      buf_puts(b, "sp_box_str(sp_str_b(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"b\")))"); return 1;
+    }
     if (sp_streq(name, "scrub") && argc == 0) {
       buf_puts(b, "sp_box_str(sp_str_scrub(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"scrub\"), 0))"); return 1;
     }
@@ -13066,7 +13075,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       ((sp_streq(name, "unpack") && argc == 1) ||
        (sp_streq(name, "byteslice") && (argc == 1 || argc == 2)) ||
        (sp_streq(name, "scrub") && argc == 1) ||
-       (sp_streq(name, "encode") && argc >= 1 && argc <= 3))) {
+       (sp_streq(name, "encode") && argc >= 1 && argc <= 3) ||
+       ((sp_streq(name, "force_encoding") || sp_streq(name, "encode!")) && argc >= 1 && argc <= 2))) {
     if (sp_streq(name, "unpack")) {
       buf_puts(b, "sp_box_poly_array(sp_str_unpack(sp_poly_recv_s(");
       emit_expr(c, recv, b); buf_puts(b, ", \"unpack\"), ");
@@ -13100,6 +13110,16 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, "sp_box_str(sp_str_scrub(sp_poly_recv_s(");
       emit_expr(c, recv, b); buf_puts(b, ", \"scrub\"), ");
       emit_str_expr(c, argv[0], b); buf_puts(b, "))");
+    }
+    else if (sp_streq(name, "force_encoding") || sp_streq(name, "encode!")) {
+      /* the String receiver's arm on the unboxed value: a `String | nil` slot
+         holding a String answered NoMethodError for want of this (#4441) */
+      Buf rb; memset(&rb, 0, sizeof rb);
+      buf_puts(&rb, "sp_poly_recv_s("); emit_expr(c, recv, &rb); buf_printf(&rb, ", \"%s\")", name);
+      buf_puts(b, "sp_box_str(");
+      emit_str_force_encoding(c, rb.p ? rb.p : "", argv, argc, b);
+      buf_puts(b, ")");
+      free(rb.p);
     }
     else {  /* encode: the same transcode the String receiver takes (#4439) */
       Buf rb; memset(&rb, 0, sizeof rb);
