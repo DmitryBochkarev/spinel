@@ -2819,6 +2819,10 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
     if (ns == ne) continue;
     const char *nm = b->p + ns; size_t nn = ne - ns;
     if (nn > 6 && !strncmp(nm, "_cell_", 6)) { nm += 6; nn -= 6; }
+    /* the capture struct's field for cell `x` is `c_x`; without the strip no
+       store made through `_cap` matched the declaration and the proc body's
+       every `(*cap->c_x) = v` went unrecorded */
+    else if (nn > 2 && !strncmp(nm, "c_", 2) && ns >= 2 && b->p[ns-1] == '>' && b->p[ns-2] == '-') { nm += 2; nn -= 2; }
     if (!wb_cells_has(&cs, nm, nn)) continue;
     if (!strncmp(b->p + is, "SP_WBO(", 7)) continue;
     /* At statement position, run the barrier AFTER the store: the value

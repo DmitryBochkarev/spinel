@@ -139,6 +139,10 @@ void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if
   /* an explicitly given message stays, even empty (#3713) */
   e->msg = sp_sprintf("%s", (msg && msg[0]) ? msg
                             : (msg == sp_exc_no_msg ? "" : e->cls_name));
+  /* The sprintf can collect, and a collection promotes the rooted object it
+     is filling: an old holder then receives a young string. Recorded after
+     the store, since the allocation would clear a record made before it. */
+  sp_gc_wb((void *)e);
   return e;
 }
 void sp_exc_gc_scan(void *p) {
@@ -176,6 +180,7 @@ void sp_exc_gc_scan(void *p) {
 sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt) {
   SP_GC_ROOT(e);
   SP_GC_ROOT(bt);
+  sp_gc_wb((void *)e);   /* the receiver may be old; bt is not */
   e->backtrace = bt;
   return bt ? sp_box_obj(bt, SP_BUILTIN_STR_ARRAY) : sp_box_nil();
 }
@@ -215,6 +220,7 @@ sp_Exception *sp_exc_new(const char *cls_name, const char *msg) {if (msg != sp_e
   e->msg = sp_sprintf("%s", (msg && msg[0]) ? msg
                             : (msg == sp_exc_no_msg ? ""
                                                     : (cls_name ? cls_name : "RuntimeError")));
+  sp_gc_wb((void *)e);   /* same reason as sp_exc_new_sub_sized */
   return e;
 }
 /* Exception#==: same class and message (CRuby value equality); #equal?
@@ -272,6 +278,7 @@ sp_Exception *sp_exc_exception(sp_Exception *e, const char *msg) {SP_GC_ROOT(e);
   sp_Exception *n = sp_exc_dup(e);
   SP_GC_ROOT(n);
   n->msg = sp_sprintf("%s", (msg && msg[0]) ? msg : (n->cls_name ? n->cls_name : "RuntimeError"));
+  sp_gc_wb((void *)n);   /* same reason as sp_exc_new_sub_sized */
   return n;
 }
 /* Accept `volatile` pointers: LV slots holding sp_Exception * are

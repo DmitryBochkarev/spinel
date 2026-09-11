@@ -1082,8 +1082,14 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_retval.rb \
                   test/gc_minor_thread_tls_first_write.rb \
                   test/proc_cell_capture_marked.rb \
-                  test/gc_minor_byref_lent_slot.rb
+                  test/gc_minor_byref_lent_slot.rb \
+                  test/gc_minor_barrier_holders.rb
 
+# Each program runs with the minor mark off and on and must answer the same;
+# then once more under the generational verifier with stress on (every
+# allocation collects, so every survivor promotes), which reports any holder
+# the write barrier did not record -- the failure the two answers alone can
+# only expose by luck.
 gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcminor.XXXXXX); ok=1; \
 	for src in $(GC_MINOR_TESTS); do \
@@ -1098,6 +1104,10 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	      echo "gc-minor-test: FAIL ($$bn: SPINEL_GC_MINOR=$$mode output mismatch)"; \
 	      diff -u "$$src.expected" "$$tmp/$$bn.$$mode" | head -10; ok=0; fi; \
 	  done; \
+	  SPINEL_GC_MINOR=1 SPINEL_GC_VERIFY_GEN=1 SPINEL_GC_STRESS=1 $(TIMEOUT60) "$$tmp/$$bn" > /dev/null 2> "$$tmp/$$bn.verify"; \
+	  if grep -q "generational check" "$$tmp/$$bn.verify"; then \
+	    echo "gc-minor-test: FAIL ($$bn: a holder the barrier did not record)"; \
+	    head -4 "$$tmp/$$bn.verify"; ok=0; fi; \
 	done; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi

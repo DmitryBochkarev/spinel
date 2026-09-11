@@ -1942,6 +1942,7 @@ sp_File *sp_file_stat_handle(const char *path) {SP_GC_ROOT_STR(path);
   SP_GC_ROOT(f);   /* the sprintf below allocates, and nothing else holds the fresh handle */
   f->fp = NULL;
   f->path = sp_sprintf("%s", path ? path : "");
+  sp_gc_wb((void *)f);   /* the sprintf can promote the rooted handle */
   f->mode = (&("\xff" "stat")[1]);
   f->lineno = 0;
   return f;
@@ -1958,6 +1959,7 @@ sp_File *sp_file_lstat_handle(const char *path) {SP_GC_ROOT_STR(path);
   SP_GC_ROOT(f);
   f->fp = NULL;
   f->path = sp_sprintf("%s", path ? path : "");
+  sp_gc_wb((void *)f);   /* the sprintf can promote the rooted handle */
   f->mode = (&("\xff" "lstat")[1]);
   f->lineno = 0;
   return f;
@@ -2198,6 +2200,7 @@ sp_Dir *sp_Dir_new(const char *path) {SP_GC_ROOT_STR(path);
   d->path = NULL;   /* set below: the sprintf may GC, and the scan reads path */
   SP_GC_ROOT(d);
   d->path = sp_sprintf("%s", path ? path : "");
+  sp_gc_wb((void *)d);   /* the sprintf can promote the rooted handle */
   return d;
 }
 /* Dir.for_fd(fd): take over a descriptor already opened on a directory. The
@@ -3665,6 +3668,7 @@ sp_Addrinfo *sp_addrinfo_new(const char *ip, sp_int port, sp_int stype, sp_int i
   a->ip = sp_sprintf("%s", ip ? ip : "");
   int v6 = !is_unix && ip && strchr(ip, ':') != NULL;
   a->afname = sp_sprintf("%s", is_unix ? "AF_UNIX" : v6 ? "AF_INET6" : "AF_INET");
+  sp_gc_wb((void *)a);   /* the two sprintfs can promote the rooted object */
   a->afamily = is_unix ? AF_UNIX : v6 ? AF_INET6 : AF_INET;
   a->port = port;
   a->socktype = stype;

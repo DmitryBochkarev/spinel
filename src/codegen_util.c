@@ -786,6 +786,15 @@ void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent) {
           else {
             buf_printf(b, "%s = (sp_int *)sp_gc_alloc(sizeof(sp_int), NULL, NULL); *%s = 0;\n", cellv, cellv);
           }
+          /* The fresh cell is young and the capture struct it was just stored
+             into can be old (the enclosing proc outlived a promotion), so the
+             store is recorded -- after it, since the allocation above can
+             collect and clear a record made before it. The `_cell_x` form is
+             a frame local and needs nothing. */
+          if (cellv != rn2 && cellv[0] == '(') {
+            emit_indent(b, indent);
+            buf_puts(b, "sp_gc_wb((void *)_cap);\n");
+          }
         }
         else if (lv && lv->type != TY_UNKNOWN && !lv->is_cell) {
           emit_indent(b, indent);

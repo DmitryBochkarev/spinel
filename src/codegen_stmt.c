@@ -5849,10 +5849,15 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
    * slot is present would leave a re-raised object with whatever backtrace its
    * previous owner set, which is what #895 documents. The array allocation is
    * why this stands after the push and not before it. */
-  buf_printf(b, "if (_ce_%d->backtrace == NULL) _ce_%d->backtrace = sp_backtrace_captured();\n", rc, rc);
+  /* The catch-site object can be OLD -- a re-raised one, a constant instance,
+     or simply one promoted between the raise and this catch -- and both
+     stores below put young values into it, so the barrier records it first.
+     After the capture, not before: the capture allocates, and a collection
+     inside it clears the record a barrier ahead of it would have made. */
+  buf_printf(b, "if (_ce_%d->backtrace == NULL) { sp_StrArray *_bt = sp_backtrace_captured(); sp_gc_wb((void *)_ce_%d); _ce_%d->backtrace = _bt; }\n", rc, rc, rc);
   emit_indent(b, indent);
   /* an exception never loses a cause it already carries (#3745) */
-  buf_printf(b, "if (!_ce_%d->cause) _ce_%d->cause = (sp_Exception *)sp_pending_cause; sp_pending_cause = NULL;\n", rc, rc);
+  buf_printf(b, "if (!_ce_%d->cause) { sp_gc_wb((void *)_ce_%d); _ce_%d->cause = (sp_Exception *)sp_pending_cause; } sp_pending_cause = NULL;\n", rc, rc, rc);
   g_rescue_save_stack[g_rescue_save_depth++] = (RescueSave){ g_exc_frame_depth };
   if (has_bind) {
     emit_indent(b, indent);
@@ -9948,7 +9953,7 @@ else {
       buf_printf(b, "sp_Exception *_t%d = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
                     " : sp_exc_new_for_catch(sp_exc_cls[sp_exc_top], sp_exc_msg[sp_exc_top]);\n", tce);
       emit_indent(b, indent + 1);
-      buf_printf(b, "_t%d->cause = (sp_Exception *)sp_pending_cause; sp_pending_cause = NULL;\n", tce);
+      buf_printf(b, "sp_gc_wb((void *)_t%d); _t%d->cause = (sp_Exception *)sp_pending_cause; sp_pending_cause = NULL;\n", tce, tce);
       emit_indent(b, indent + 1);
       buf_printf(b, "sp_rescue_push((void *)_t%d);\n", tce);
     }
