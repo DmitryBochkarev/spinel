@@ -594,8 +594,13 @@ void sp_gc_collect(void){
   sp_gc_mark_all();
   if(sp_gc_minor){
     /* the remembered set is the rest of the root set for a minor: each entry is
-       an old object holding a reference the walk above did not follow. */
-    sp_gc_minor = 0;
+       an old object holding a reference the walk above did not follow. The
+       minor stays in force through this walk and the drain: every survivor of
+       a minor is promoted by its sweep, so an old object never holds a young
+       one except through a recorded store, and walking INTO old objects here
+       only re-marks what the cycle cannot free. Clearing the flag first made
+       the drain do exactly that: 27% (gcbench) to 48% (threaded render) of a
+       minor's marked objects were old, and its time followed the count. */
     for(int ri=0;ri<sp_gc_nremembered;ri++){
       sp_gc_hdr *rh=(sp_gc_hdr*)sp_gc_remembered[ri]-1;
       if(rh->scan) rh->scan(sp_gc_remembered[ri]);
