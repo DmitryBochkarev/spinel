@@ -183,7 +183,20 @@ static inline void sp_gc_wb(void *obj) {
      for a reader that never comes. rubys observed the other half of this from
      the source: `old` is set on every survivor regardless of the mode, so the
      barrier was doing its full work in both. */
-  if (__builtin_expect(sp_gc_minor_on, 0)) sp_gc_wb_slow(obj);
+  if (__builtin_expect(sp_gc_minor_on, 0)) {
+    /* With the mark on, the common case -- a young holder, or an old one
+       already recorded -- is decided here from the header the store is about
+       to touch anyway, so the call is paid only by a store that actually
+       records something. The tag byte says whether there is a header at all
+       (the same protocol sp_gc_wb_slow and sp_gc_mark read). */
+    if (!obj) return;
+    unsigned char pm = ((const unsigned char *)obj)[-1];
+    if (pm == 0xfd || pm == 0xff || pm == 0xf1 || pm == 0xf0 ||
+        pm == 0xfe || pm == 0xfc || pm == 0xfb) return;
+    const sp_gc_hdr *h = (const sp_gc_hdr *)obj - 1;
+    if (!h->old || h->dirty) return;
+    sp_gc_wb_slow(obj);
+  }
 }
 /* Young object heap. Threaded build: per-worker lists (one pusher each, since a
    started thread is pinned to its worker), so allocation pushes without the
@@ -378,6 +391,11 @@ void sp_oom_die(void);
  * same way fibers register sp_gc_mark_suspended_fibers_hook. */
 extern void (*sp_gc_mark_globals_hook)(void);
 extern void (*sp_gc_str_sweep_hook)(void);
+/* Whether the string heap's own schedule (or its growth backstop) would take
+   a major this cycle. A string major needs a whole-heap mark, so under the
+   minor mark the object cycle it lands on has to be full; the collector asks
+   this before it decides. */
+extern int (*sp_gc_str_major_due_hook)(void);
 
 /* ---- value-introspection hooks (set by the generated TU at startup) ----
  * lib/sp_json.c (and other cold readers) own no container types; they reach the
