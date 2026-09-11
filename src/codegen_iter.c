@@ -355,6 +355,13 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
      keyword gone. The ordinary call path has raised on this all along; sharing
      the rule is what keeps the two answers the same (#4419). */
   emit_unknown_kwarg_raise(c, m, kwh);
+  /* The options-hash idiom: a braceless keyword hash no keyword parameter
+     claims packs into the first unfilled positional (`def check(sel, opts =
+     nil)` called `check(".x", count: 0)`). The other two call paths have done
+     this since #3191; this one looked the keys up by parameter NAME only, so
+     `opts` kept its default and every `assert_select(sel, count: 0)` in a
+     yielding helper asserted presence instead (#4436). */
+  int kwh_slot = kwh_positional_slot(c, m, kwh, pos_argc);
   for (int i = 0; i < m->nparams; i++) {
     emit_indent(b, din);
     { char rn[128]; snprintf(rn, sizeof rn, "_y%d_%s", tag, m->pnames[i]);
@@ -408,6 +415,8 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
        **kwrest) param: it binds by name, never positionally. */
     else if (i < pos_argc && !(m->rest_idx >= 0 && i > m->rest_idx))
       emit_arg_or_default(c, m, i, argv[i], b);
+    else if (i == kwh_slot)
+      emit_arg_or_default(c, m, i, kwh, b);
     else {
       int kv = kwh >= 0 ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
       /* No literal key for this keyword param, but a `**hash` was splatted:
