@@ -38,6 +38,7 @@ int sp_gc_cycle = 0;
 void (*sp_gc_mark_suspended_fibers_hook)(void) = NULL;
 void (*sp_gc_mark_globals_hook)(void) = NULL;
 void (*sp_gc_str_sweep_hook)(void) = NULL;
+int (*sp_gc_str_major_due_hook)(void) = NULL;
 const char *(*sp_sym_name_fn)(sp_sym) = NULL;
 int (*sp_json_kind_fn)(sp_RbVal) = NULL;
 sp_int (*sp_json_len_fn)(sp_RbVal) = NULL;
@@ -571,6 +572,17 @@ void sp_gc_collect(void){
   int forced_full=0;
   if(!full&&!sp_gc_full_interval_fixed&&
      sp_gc_old_bytes>sp_gc_old_live*2+SP_GC_OLD_GROWTH_SLACK){ full=1; forced_full=1; }
+  /* The string heap runs its own major cadence, and a string major needs a
+     whole-heap mark: on a minor cycle the sweep has to stand it down, since
+     the old strings only old objects hold were never marked. Standing it down
+     silently let the string old generation grow to the object FULL cadence
+     instead of its own -- 36 MB of old strings against a 0.6 MB live set on
+     one benchmark, and the wall with it. So a due string major makes the
+     cycle full. Off-schedule for the object heap, so its cadence does not
+     adapt on the sample. */
+  int str_full=0;
+  if(!full&&sp_gc_minor_on&&!sp_gc_full_interval_fixed&&
+     sp_gc_str_major_due_hook&&sp_gc_str_major_due_hook()){ full=1; str_full=1; }
   if(full)sp_gc_full_runs++;
   /* new mark generation: every object becomes unmarked without touching it.
      On the (30-bit) wrap, clear the whole heap once so no stale stamp can
@@ -663,6 +675,7 @@ void sp_gc_collect(void){
     if(!sp_gc_full_interval_fixed&&forced_full){
       if(sp_gc_full_interval>SP_GC_FULL_INTERVAL) sp_gc_full_interval/=2;
     }
+    else if(str_full){ /* the string heap's sample, not this heap's */ }
     else if(old_before>0&&!sp_gc_full_interval_fixed){
       size_t kept=sp_gc_old_bytes;
       if(kept>old_before-(old_before>>2)){            /* >75% survived */

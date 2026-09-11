@@ -835,6 +835,20 @@ static size_t sp_str_gate_before = 0;
 #ifdef SP_THREADS
 int sp_str_par_done = 0;   /* the workers already did it for this collection */
 #endif
+/* The decision sp_str_sweep_begin will make this cycle, without its side
+   effects (the cycle counter, the shape sample): over the trigger, and a major
+   on schedule or forced by the old generation's growth. */
+static int sp_str_major_due(void) {
+#ifdef SP_THREADS
+  size_t before = sp_str_bytes_total();
+#else
+  size_t before = SP_GC_CTR_GET(sp_str_heap_bytes);
+#endif
+  if (before <= SP_GC_CTR_GET(sp_str_threshold)) return 0;
+  if (sp_str_old_total() > sp_str_old_threshold) return 1;
+  if (!sp_gc_str_major_sched) return 0;
+  return (sp_str_sweep_cycle % (unsigned)sp_str_major_interval) == 0;
+}
 int sp_str_sweep_begin(int *major) {
 #ifdef SP_THREADS
   size_t before = sp_str_bytes_total();
@@ -954,6 +968,7 @@ char *sp_str_alloc_ext(size_t len) { return sp_str_alloc(len); }
    set before the first allocation can trigger a collection. */
 __attribute__((constructor)) static void sp_alloc_install_hooks(void) {
   sp_gc_str_sweep_hook = sp_str_sweep_gated;
+  sp_gc_str_major_due_hook = sp_str_major_due;
   sp_gc_obj_retune_hook = sp_gc_retune_object;
   sp_alloc_floors_from_env();
 }
