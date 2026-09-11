@@ -3997,7 +3997,45 @@ static int cmethod_reaches_class_ivar(Compiler *c, int mi, int def_cls, int dept
    that would resolve differently when run as a class method of `ci`? That is:
    a bare `new` (constructs ci), or a bare cmethod call that resolves to ci's
    own version directly or transitively (cmethod_reaches_override). */
+static int cmethod_needs_specialization_d(Compiler *c, int mi, int ci, int def_cls,
+                                          int *has_new, int depth);
+
+/* A bare call to a SIBLING class method that itself needs specializing. The
+   sibling's `new` constructs the CALLING class, and reaching it through this
+   method must not lose that -- but this method's own body has no `new` in it,
+   so none of the tests below saw a reason to specialize it, and the generic
+   copy was used. Its bare call then resolved in the DEFINING class's chain and
+   built the base: `Closed.create_for` -> `create!` -> `new` answered a Room,
+   with no diagnostic (#4427). One hop was right because the one hop is what
+   the tests below cover.
+   specialize_cmethod_for already recurses into such calls once a method has
+   been chosen -- its own comment calls that the #1451 fix. What was missing is
+   CHOOSING this one. Depth-capped like its neighbours, which is also what
+   terminates a pair of cmethods that call each other. */
+static int cmethod_calls_specialized_sibling(Compiler *c, int mi, int ci, int def_cls, int depth) {
+  if (depth > 8) return 0;
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    if (c->nscope[id] != mi) continue;
+    if (nt_ref(nt, id, "receiver") >= 0) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || sp_streq(nm, "new")) continue;
+    int sdef = -1;
+    int smi = comp_cmethod_in_chain(c, def_cls, nm, &sdef);
+    if (smi < 0 || smi == mi || sdef < 0) continue;
+    if (comp_cmethod_in_class(c, ci, nm) >= 0) continue;   /* ci owns it already */
+    int hn = 0;
+    if (cmethod_needs_specialization_d(c, smi, ci, sdef, &hn, depth + 1)) return 1;
+  }
+  return 0;
+}
+
 int cmethod_needs_specialization(Compiler *c, int mi, int ci, int def_cls, int *has_new) {
+  return cmethod_needs_specialization_d(c, mi, ci, def_cls, has_new, 0);
+}
+
+static int cmethod_needs_specialization_d(Compiler *c, int mi, int ci, int def_cls,
+                                          int *has_new, int depth) {
   const NodeTable *nt = c->nt;
   int need = 0;
   if (has_new) *has_new = 0;
@@ -4017,6 +4055,7 @@ int cmethod_needs_specialization(Compiler *c, int mi, int ci, int def_cls, int *
      separate mechanism, so only plain @ivar nodes trigger this. */
   if (!need && cmethod_reaches_class_ivar(c, mi, def_cls, 0)) need = 1;
   if (cmethod_reaches_override(c, mi, ci, def_cls, 0)) need = 1;
+  if (!need && cmethod_calls_specialized_sibling(c, mi, ci, def_cls, depth)) need = 1;
   return need;
 }
 
