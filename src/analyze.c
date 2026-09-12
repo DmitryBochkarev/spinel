@@ -14348,6 +14348,7 @@ void analyze_program(Compiler *c) {
     }
     msym_names[msym_n++] = msym;
   }
+  int msym_pinned = 0;
   for (int s = 0; s < c->nscopes; s++) {
     Scope *sc = &c->scopes[s];
     if (!sc->reachable || !sc->name) continue;
@@ -14355,21 +14356,33 @@ void analyze_program(Compiler *c) {
     for (int i = 0; i < msym_n && !taken; i++)
       if (sp_streq(msym_names[i], sc->name)) taken = 1;
     if (taken) {
-      /* The bound-Method ABI is `sp_int (*)(void *, sp_int...)`: the dispatch
-         site (sp_poly_arr_get_hash / sp_poly_slice) reads the return as sp_int
-         and passes int args. So a method(:sym) target MUST return int and take
-         int params -- a poly return (e.g. PPU#peek_2002 returning the poly
-         @io_latch) would be misread as a struct through the int cast and yield
-         garbage. Pin unknown params to int and a poly/unknown return to int
-         (codegen coerces the body's poly return via sp_poly_to_i). */
+      /* The bound-Method ABI passes sp_int args, so a param nothing else
+         typed is pinned to int rather than left undeclared. The return is
+         NOT pinned any more: the bind site stamps the kind of the C return
+         and every Method call reads it (SP_BM_RET_POLY takes the sp_RbVal
+         cast, d879c8b0 / 21f32341), so a poly-returning target is called
+         correctly as it is. Pinning it to int retyped the method for its
+         DIRECT callers too -- `ip = obj.ip` read a String's to_i once
+         `method(:ip)` appeared anywhere in the program (#4451). An UNKNOWN
+         return still defaults to int, as before, so the method is emitted
+         with a value rather than as void. */
       for (int i = 0; i < sc->nparams; i++) {
         LocalVar *p = sc->pnames[i] ? scope_local(sc, sc->pnames[i]) : NULL;
-        if (p && p->type == TY_UNKNOWN) p->type = TY_INT;
+        if (p && p->type == TY_UNKNOWN) { p->type = TY_INT; msym_pinned = 1; }
       }
-      if (sc->ret == TY_UNKNOWN || sc->ret == TY_POLY) sc->ret = TY_INT;
+      if (sc->ret == TY_UNKNOWN) { sc->ret = TY_INT; msym_pinned = 1; }
     }
   }
   free(msym_names);
+  /* A pin here is a type change after the fixpoint: what the body computes
+     from that parameter -- an ivar it stores, the return it becomes -- and
+     every direct caller of the method still carry the types they had before
+     it. `def poke(a, v) = @latch = v.odd? ? "s" : v` had @latch a String
+     while v was unknown and a poly once v was an int, and `p pad.peek(0)`
+     kept the String reading over a poly-returning callee (the C did not
+     compile). Let the writes settle again. */
+  if (msym_pinned)
+    for (int k = 0; k < 8; k++) { int ch = infer_write_types(c); ch |= infer_return_types(c); if (!ch) break; }
 
 
   /* Propagate ivar types up the inheritance chain: a base-class method runs on
@@ -14609,6 +14622,14 @@ void analyze_program(Compiler *c) {
        pre-widen scalar type: an unsound `sp_StrArray *` <- `sp_RbVal` at
        `local = @ivar` (#1793). */
     ch |= reconcile_locals_reading_ivars(c);
+    /* A method whose value IS such an ivar (`def peek(a) = @latch`) still
+       carries the return derived before the ivar widened, and its callers
+       read a poly through a String (the C did not build, #4451). Re-derive
+       the returns on the widened ivars; the gate against a new poly is off,
+       since the widening is exactly what the body now says. */
+    g_ret_no_new_poly = 2;
+    ch |= infer_return_types(c);
+    g_ret_no_new_poly = 0;
     if (!ch) break;
   }
 
