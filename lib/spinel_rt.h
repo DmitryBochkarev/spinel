@@ -84,10 +84,13 @@ static int sp_bt_n = 0;
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
+/* malloc_trim is glibc's: the collector (sp_gc.c) returns freed arena pages
+   with it after a full cycle, and nowhere else defines it -- not Darwin, not
+   the BSDs, not musl. Nothing here calls it; the no-op keeps any generated
+   or carried C that spells it portable. */
+#if defined(__GLIBC__)
 #include <malloc.h>
 #else
-/* Darwin's libc has no malloc_trim; make it a no-op so call sites stay portable. */
 #define malloc_trim(x) ((void)0)
 #endif
 #ifndef MAP_ANONYMOUS

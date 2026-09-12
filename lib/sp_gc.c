@@ -6,10 +6,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+/* malloc_trim is glibc's (returns freed arena pages to the OS); no other libc
+   has it, so elsewhere the trim below is a no-op and RSS is whatever the
+   allocator keeps. An interposed allocator (jemalloc) makes it a no-op on
+   glibc too: the symbol walks glibc's own, then empty, arena. */
 #if defined(__GLIBC__)
 #include <malloc.h>
 #else
-/* Darwin's libc has no malloc_trim; make it a no-op so call sites stay portable. */
 #define malloc_trim(x) ((void)0)
 #endif
 #include <unistd.h>
@@ -941,9 +944,18 @@ void sp_gc_collect(void){
   SP_GC_PH(sp_gc_ph_strsweep);
   sp_gc_str_minor_only = 0;
   /* malloc_trim walks the allocator arena; once per full cycle was ~10% of
-     collection time on allocation-heavy runs. Every 4th full keeps the RSS
-     benefit at a fraction of the cost. */
-  if(full&&(sp_gc_full_runs%4)==1)malloc_trim(0);
+     collection time on allocation-heavy runs, and "every 4th full" was a
+     fraction of that only while a full was one cycle in eight. Under the
+     generational mark a small-heap server runs nearly every cycle full (the
+     cadence rule's floor), and every 4th of THOSE was 2.4 s of a 6.3 s
+     collector budget on campfire, against 0.46 s with the mark off. The
+     arena does not need walking more than about once a second: the RSS it
+     returns is what the last second freed. */
+  if(full){
+    static double last_trim=0;
+    double now=sp_gc_stat_now();
+    if(now-last_trim>=1.0){ malloc_trim(0); last_trim=now; }
+  }
   SP_GC_PH(sp_gc_ph_trim);
   /* Bump BEFORE the retune hook: the hook is where the stats line is printed
      (sp_alloc.c sees both thresholds and the string heap), and it must read
