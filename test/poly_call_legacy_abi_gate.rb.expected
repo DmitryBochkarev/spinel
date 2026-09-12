@@ -1,5 +1,5 @@
-bool: NoMethodError
-symbol: NoMethodError
+true
+:sym
 optional: NoMethodError
 rest_used: NoMethodError
 rest_unused: NoMethodError
@@ -23,7 +23,7 @@ x
 nil
 toproc_rest: NoMethodError
 toproc_rest_anon: NoMethodError
-toproc_bool: NoMethodError
+false
 toproc_arity: NoMethodError
 toproc_ptr: NoMethodError
 5

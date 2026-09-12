@@ -74,6 +74,28 @@ void sp_curry_publish_args(sp_Curry *c);
 #define SP_BM_RET_STR       1
 #define SP_BM_RET_INT_ARRAY 2
 #define SP_BM_RET_STR_ARRAY 3
+/* A void C return (a Ruby method whose value is nil, or unused): the cast
+   reads an undefined register and the answer is nil regardless. */
+#define SP_BM_RET_NIL       4
+/* The C function returns sp_RbVal (a poly Ruby return): a 16-byte struct
+   comes back in two registers, which no sp_int cast can read, so the call
+   arms take the sp_RbVal cast for this kind and box nothing. */
+#define SP_BM_RET_POLY      5
+/* A bool C return: the callee writes the low byte of the return register and
+   leaves the rest undefined (SysV x86-64 and AArch64 both), so the low byte
+   is the whole answer. A Symbol is its id in an sp_int. */
+#define SP_BM_RET_BOOL      6
+#define SP_BM_RET_SYM       7
+/* A user-class pointer return: the low byte is the kind and the bits above it
+   carry the class id the bind site knew statically (a class without
+   subclasses), or nothing when the object carries its own id in its first
+   field (a subclassed class: the _dyn box reads it, as the generated boxing
+   sites do). Unlike the kinds above, this one is NOT a plain enumerator, so
+   sp_bm_box_ret matches on the low byte. */
+#define SP_BM_RET_OBJ       8
+#define SP_BM_RET_OBJ_DYN   9
+#define SP_BM_RET_KIND(r)   ((r) & 0xff)
+#define SP_BM_RET_OBJ_OF(cls) (SP_BM_RET_OBJ | ((sp_int)(cls) << 8))
 typedef struct sp_BoundMethod { void *self; sp_int fn; const char *name; sp_int arity;
   const char *desc;   /* compile-time #inspect rendering ("#<Method: Owner#name(params)>"), or NULL */
   sp_int self_kind;  /* SP_BM_SELF_* */
@@ -129,12 +151,24 @@ static inline sp_BoundMethod *sp_bm_set_abi(sp_BoundMethod *m, sp_int recv_bound
    sp_poly_as_int_or_nil / sp_box_int_or_nil in sp_alloc.h) so boxing it as nil
    is the documented invariant. */
 static inline sp_RbVal sp_bm_box_ret(sp_BoundMethod *m, sp_int raw) {
-  switch (m ? m->legacy_ret : SP_BM_RET_INT) {
+  sp_int r = m ? m->legacy_ret : SP_BM_RET_INT;
+  switch (SP_BM_RET_KIND(r)) {
     case SP_BM_RET_STR:       return sp_box_str((const char *)(uintptr_t)raw);
     case SP_BM_RET_INT_ARRAY: return sp_box_nullable_obj((void *)(uintptr_t)raw, SP_BUILTIN_INT_ARRAY);
     case SP_BM_RET_STR_ARRAY: return sp_box_nullable_obj((void *)(uintptr_t)raw, SP_BUILTIN_STR_ARRAY);
+    case SP_BM_RET_NIL:       return sp_box_nil();
+    case SP_BM_RET_BOOL:      return sp_box_bool((raw & 0xff) != 0);
+    case SP_BM_RET_SYM:       return (sp_sym)raw != (sp_sym)-1 ? sp_box_sym((sp_sym)raw) : sp_box_nil();
+    case SP_BM_RET_OBJ:       return sp_box_nullable_obj((void *)(uintptr_t)raw, (int)(r >> 8));
+    case SP_BM_RET_OBJ_DYN:   return sp_box_nullable_obj_dyn((void *)(uintptr_t)raw, 0);
     default:                  return sp_box_int_or_nil(raw);
   }
+}
+/* The raw register as the trampoline hands it back untouched to a typed
+   caller: a bool callee wrote only the low byte, so normalise it to 0/1 there;
+   every other kind is already the value (an int, a Symbol id, a pointer). */
+static inline sp_int sp_bm_norm_ret(sp_BoundMethod *m, sp_int raw) {
+  return (m && SP_BM_RET_KIND(m->legacy_ret) == SP_BM_RET_BOOL) ? ((raw & 0xff) != 0) : raw;
 }
 /* Mark a statically-built instance_method/#unbind result as an UnboundMethod,
    so a later dynamic .call/[] through a container sees m->unbound and raises

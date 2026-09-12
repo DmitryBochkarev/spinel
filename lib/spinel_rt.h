@@ -4274,7 +4274,13 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
        int token (or the TY_UNKNOWN wildcard), not some other scalar kind. */
     if (sp_bm_legacy_abi_ok(m, 2, "0000000100000001")) {
       /* A top-level method has no self; its C signature leads with the first
-         parameter, so the self-ful cast would shift both operands (#4395). */
+         parameter, so the self-ful cast would shift both operands (#4395). A
+         poly return is an sp_RbVal in two registers, so it takes its own cast. */
+      if (m->legacy_ret == SP_BM_RET_POLY) {
+        if (m->recv_bound)
+          return ((sp_RbVal (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len);
+        return ((sp_RbVal (*)(sp_int, sp_int))(uintptr_t)m->fn)(start, len);
+      }
       if (m->recv_bound)
         return sp_bm_box_ret(m, ((sp_int (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len));
       return sp_bm_box_ret(m, ((sp_int (*)(sp_int, sp_int))(uintptr_t)m->fn)(start, len));
@@ -7050,6 +7056,11 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_METHOD) {
     sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
     if (sp_bm_legacy_abi_ok(m, 1, "00000001")) {
+      if (m->legacy_ret == SP_BM_RET_POLY) {   /* an sp_RbVal return needs its own cast */
+        if (m->recv_bound)
+          return ((sp_RbVal (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i);
+        return ((sp_RbVal (*)(sp_int))(uintptr_t)m->fn)(i);
+      }
       if (m->recv_bound)
         return sp_bm_box_ret(m, ((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i));
       return sp_bm_box_ret(m, ((sp_int (*)(sp_int))(uintptr_t)m->fn)(i));

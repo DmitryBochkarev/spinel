@@ -4,7 +4,7 @@
 # sites stamp method_legacy_int_abi as 1 (callable) with a per-position type
 # signature, or 0 (decline), and the poly `.call`/`[]` paths compare each
 # position's type against it. A target that cannot ride the cast -- a
-# bool/symbol return, a keyword parameter, a rest parameter, a class
+# float return, a keyword parameter, a rest parameter, a class
 # method that needs its receiving class, an argument count that does not match
 # the signature, a pointer of the wrong kind (a String parameter fed an
 # IntArray, or an object of another class), or a pointer fed to an untyped
@@ -71,8 +71,11 @@ end
 
 class Derived < Base; end
 
-expect_nome("bool")          { [Base.new.method(:bool_method)][0].call(1) }
-expect_nome("symbol")        { [Base.new.method(:sym_method)][0].call(1) }
+# A bool or Symbol return rides the cast: the bind site stamps the kind and
+# the box reads the low byte / the Symbol id (poly_method_call_return_kinds.rb
+# has every kind).
+p [Base.new.method(:bool_method)][0].call(1)
+p [Base.new.method(:sym_method)][0].call(1)
 expect_nome("optional")      { [Base.new.method(:opt_method)][0].call(1) }
 expect_nome("rest_used")     { [Base.new.method(:rest_used)][0].call(1, 2, 3) }
 # An unused rest parameter is declined too: the callee prologue roots its
@@ -122,7 +125,7 @@ puts [sag.method(:[]), Handler.new][0].call(9).inspect
 # rest target's garbage pointer reached SP_GC_ROOT/sp_gc_mark and segfaulted.
 expect_nome("toproc_rest")      { [Base.new.method(:rest_unused)][0].to_proc.call(1, 2, 3) }
 expect_nome("toproc_rest_anon") { [Base.new.method(:rest_anon)][0].to_proc.call(1, 2, 3) }
-expect_nome("toproc_bool")      { [Base.new.method(:bool_method)][0].to_proc.call(1) }
+p [Base.new.method(:bool_method)][0].to_proc.call(0)
 expect_nome("toproc_arity")     { [Base.new.method(:two_args)][0].to_proc.call(1) }
 # A pointer-typed parameter is declined on this generic route too: it has no
 # call-site types, so an Integer argument would be read as a raw address

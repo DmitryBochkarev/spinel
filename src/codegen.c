@@ -41,7 +41,7 @@ const char *ty_nullable_builtin_id(TyKind t) {
    -typed slot holding a subclass instance, would stamp the base's id and the
    value then dispatched as the base (#3773, #4023). The object carries its own
    id in its first field, so the _dyn box reads that instead. */
-static int class_has_subclass(Compiler *c, int ocid) {
+int class_has_subclass(Compiler *c, int ocid) {
   for (int k = 0; k < c->nclasses; k++)
     if (k != ocid && c->classes[k].parent == ocid) return 1;
   return 0;

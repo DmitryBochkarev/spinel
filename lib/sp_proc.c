@@ -154,7 +154,7 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      so declining here only affects a Method that travelled through a poly
      slot; raise the same NoMethodError the poly-call gate produces instead of
      reading garbage. */
-  if (!m->legacy_int_abi || m->unbound || m->legacy_fixed > 16 ||
+  if (!m->legacy_int_abi || m->unbound || m->legacy_fixed > 16 || (m->legacy_ret == SP_BM_RET_POLY && m->legacy_fixed > 8) ||
       (m->legacy_rest ? argc < m->legacy_fixed : argc != m->legacy_fixed) ||
       !sp_bm_sig_scalar_only(m->legacy_sig, m->legacy_fixed))
     sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
@@ -162,7 +162,38 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      generated proc body writes; this trampoline only returned it, so a caller
      reading the slot saw a stale value (#3692). The casts below already assume
      the target's sp_int ABI, so box the same answer. */
-  #define SP_BM_TRAMP_RET(EXPR) do { sp_int _r = (EXPR); _sp_proc_poly_ret = sp_bm_box_ret(m, _r); return _r; } while (0)
+  #define SP_BM_TRAMP_RET(EXPR) do { sp_int _r = sp_bm_norm_ret(m, (EXPR)); _sp_proc_poly_ret = sp_bm_box_ret(m, _r); return _r; } while (0)
+  /* A poly-returning target answers a 16-byte sp_RbVal in two registers that
+     no sp_int cast can read: take the sp_RbVal cast, publish the value in the
+     boxed slot and return 0, the way a generated poly-valued proc body does. */
+  #define SP_BM_TRAMP_POLY(EXPR) do { _sp_proc_poly_ret = (EXPR); return 0; } while (0)
+  if (m->legacy_ret == SP_BM_RET_POLY) {
+    if (!m->recv_bound) {
+      switch (argc) {
+        case 0: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void))(uintptr_t)m->fn)());
+        case 1: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int))(uintptr_t)m->fn)(args[0]));
+        case 2: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1]));
+        case 3: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2]));
+        case 4: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3]));
+        case 5: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4]));
+        case 6: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5]));
+        case 7: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6]));
+        default: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]));
+      }
+    }
+    switch (argc) {
+      case 0: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *))(uintptr_t)m->fn)(m->self));
+      case 1: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int))(uintptr_t)m->fn)(m->self, args[0]));
+      case 2: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1]));
+      case 3: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2]));
+      case 4: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3]));
+      case 5: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4]));
+      case 6: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5]));
+      case 7: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6]));
+      default: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]));
+    }
+  }
+  #undef SP_BM_TRAMP_POLY
   /* A top-level method has no self parameter. The self-ful casts below would
      put `m->self` (NULL) in the leading C slot, shifting every argument by
      one -- `[method(:top_add)][0].to_proc.call(1, 2)` answered 1 instead of 3
