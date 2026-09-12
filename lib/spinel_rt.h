@@ -6755,6 +6755,18 @@ static sp_PolyArray *sp_poly_zip_none(sp_RbVal a) {
    Method arm it already had. */
 static sp_RbVal sp_poly_callable_call(sp_RbVal v, sp_int n, const sp_int *args);
 static sp_RbVal sp_poly_slice_or_call(sp_RbVal v, sp_RbVal a, sp_RbVal b) {
+  /* `s[/re/, n]` on a boxed String: capture n of the first match, nil when
+     there is none -- the form the typed emitter answers inline. Read as a
+     two-integer slice, the Regexp operand raised TypeError (campfire's
+     `response.headers["Link"][/<(.*)>/, 1]` off a Hash[String, String]). */
+  if (v.tag == SP_TAG_STR && a.tag == SP_TAG_OBJ && a.v.p && a.cls_id == SP_BUILTIN_REGEX &&
+      b.tag == SP_TAG_INT) {
+    sp_int n = b.v.i;
+    if (sp_re_match((mrb_regexp_pattern *)a.v.p, v.v.s ? v.v.s : "") < 0) return sp_box_nil();
+    if (n == 0) return sp_box_nullable_str(sp_re_match_str);
+    if (n >= 1 && n <= 9) return sp_box_nullable_str(sp_re_captures[n]);
+    return sp_box_nil();
+  }
   if (v.tag == SP_TAG_OBJ && v.v.p &&
       (v.cls_id == SP_BUILTIN_PROC || v.cls_id == SP_BUILTIN_CURRY)) {
     _sp_proc_poly_args[0] = a;
