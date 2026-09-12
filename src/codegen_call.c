@@ -947,6 +947,14 @@ static const struct { const char *cls; const char *m; int a; } sp_builtin_arity_
   {"Time","usec",0},{"Time","utc",0},{"Time","utc?",0},{"Time","utc_offset",0},
   {"Time","wday",0},{"Time","wednesday?",0},{"Time","xmlschema",-1},{"Time","yday",0},
   {"Time","year",0},{"Time","zone",0},
+  /* Kernel conversion/printing functions reachable only through the
+     receiverless `method(:name)` wrapper (the KFN0 set in analyze.c). They
+     have no receiver class to key on, so the wrapper binds them under
+     "Kernel" and Method#arity reads the real CRuby value instead of the
+     synthesized wrapper's one-parameter shape (#4395). */
+  {"Kernel","String",1},{"Kernel","Integer",-2},{"Kernel","Float",-2},
+  {"Kernel","Array",1},{"Kernel","Rational",-1},{"Kernel","Complex",-1},
+  {"Kernel","puts",-1},{"Kernel","print",-1},{"Kernel","p",-1},{"Kernel","pp",-1},
   {NULL, NULL, 0}
 };
 /* Exported probes for the analyze-side method() desugar (#2752): whether the
@@ -971,6 +979,21 @@ int builtin_method_known(const char *cls, const char *m) {
 static int method_scope_arity(Compiler *c, int target, int *out) {
   if (target < 0 || c->scopes[target].def_node < 0) return 0;
   const NodeTable *nt = c->nt;
+  /* A receiverless Kernel wrapper (`method(:String)`) has no receiver class to
+     key on, but its one declared parameter IS a real argument, so the wrapper
+     shape under-reports the builtin's arity. Read the builtin's real arity off
+     the Kernel table (String 1, Integer -2, puts -1, ...) instead (#4395). */
+  if (c->scopes[target].name && strncmp(c->scopes[target].name, "__bam_", 6) == 0 &&
+      c->scopes[target].body >= 0) {
+    int bn = 0;
+    const int *bb = nt_arr(nt, c->scopes[target].body, "body", &bn);
+    if (bn >= 1 && bb && nt_type(nt, bb[0]) && sp_streq(nt_type(nt, bb[0]), "CallNode") &&
+        nt_ref(nt, bb[0], "receiver") < 0) {
+      const char *kn = nt_str(nt, bb[0], "name");
+      int ka;
+      if (kn && builtin_method_arity("Kernel", kn, &ka)) { *out = ka; return 1; }
+    }
+  }
   int pn = nt_ref(nt, c->scopes[target].def_node, "parameters");
   int n_req = 0, n_opt = 0, n_post = 0;
   int has_rest = 0, has_forward = 0, kw_block = 0, has_req_kw = 0;
@@ -4591,6 +4614,329 @@ static int kwh_named_kwarg_fills(Compiler *c, Scope *m, int kwh) {
   return n;
 }
 
+/* Append one positional parameter's C ABI type token (eight chars) to `out`.
+   Each scalar kind gets its own small token (TY_UNKNOWN keeps 0 as the
+   wildcard), so a bool parameter never accepts an int and a symbol never
+   accepts a nil; every other kind uses 100000 + TyKind off the scalar range.
+   A bare pointer kind therefore keeps its own number -- a String parameter
+   never accepts an IntArray argument and an sp_Foo* is never handed an
+   sp_Bar* -- and an object kind already encodes its class id in TyKind.
+   Eight decimal digits leave room for 100000 + (TY_OBJ_ARRAY_BASE +
+   class_id), so a homogeneous object array never collides with a plain object
+   class. The same width and encoding are assumed by sp_bm_sig_pos_match in
+   lib/sp_proc.h. */
+static void abi_sig_token(TyKind t, char *out) {
+  int code;
+  switch (t) {
+    case TY_UNKNOWN: code = 0;     break;   /* wildcard over the scalar kinds */
+    case TY_INT:     code = 1;     break;
+    case TY_BOOL:    code = 2;     break;
+    case TY_SYMBOL:  code = 3;     break;
+    case TY_NIL:     code = 4;     break;
+    default:         code = 100000 + (int)t; break;
+  }
+  snprintf(out, 9, "%08d", code);
+}
+
+/* Classify the C function a statically-bound Method points at for the legacy
+   `sp_int (*)(void *, sp_int...)` cast the poly callable path uses, reading
+   the target's parameter/return types the dynamic call site cannot see. The
+   Method arm boxes the sp_int C return with sp_bm_box_ret, and a regular
+   method's recorded kind is always Integer, so only a TY_INT return is
+   callable here (the synthesized typed-array adapters set legacy_ret instead).
+   Otherwise: 0 declines; 1 means the target is callable
+   with *out_sig holding a per-position C ABI type token sequence and
+   *out_fixed the number of fixed positional C slots. A rest parameter,
+   keyword parameter, or a class method that needs its receiving class all
+   decline. *out_rest stays 0 (rest parameters never ride the cast; the field
+   and the runtime rest-form check are kept for a future caller that could
+   supply the trailing array). An optional/defaulted parameter is
+   callable only at full arity -- the C signature still reads that slot, so a
+   shorter call would take garbage -- and the runtime check enforces the exact
+   fixed count. The poly path reads the value back off the Method object at
+   run time (#4395). */
+static int method_legacy_int_abi(Compiler *c, int mi, int recv_bound, char *out_sig, size_t sigcap,
+                                 int *out_fixed, int *out_rest, int *out_ret) {
+  if (sigcap) out_sig[0] = 0;
+  *out_fixed = 0;
+  *out_rest = 0;
+  if (out_ret) *out_ret = 0;   /* SP_BM_RET_INT */
+  if (mi < 0) return 0;
+  Scope *m = &c->scopes[mi];
+  /* A synthesized __bam_ wrapper declares its bound receiver as its first
+     parameter; the poly path passes that receiver in the leading self slot,
+     so it is not a call argument and must not be classified (counting it
+     would shift every real argument by one and make the wrapper look
+     mixed/pointer -- #4395). A RECEIVERLESS Kernel wrapper (`method(:String)`,
+     desugar_builtin_method_obj's KFN0 set) is bound with self NULL, so its
+     __bam_r IS a real argument: only a receiver-bound wrapper's first
+     parameter rides the self slot (recv_bound is the bind site's "this
+     Method carries a receiver" flag). */
+  int is_bam = m->name && strncmp(m->name, "__bam_", 6) == 0;
+  int pstart = (is_bam && recv_bound && m->nparams > 0) ? 1 : 0;
+  /* How the raw sp_int C return boxes. A regular Method arm boxes with the
+     Integer default, so ONLY a TY_INT return is correct there: TY_NIL/
+     TY_UNKNOWN are emitted as `void` (the cast reads an undefined register),
+     and a bool is a 1-byte `sp_bool` (the sp_int cast reads undefined upper
+     register bytes) while a symbol is an sp_int carrying a Symbol id -- both
+     would box as the wrong Ruby value (true -> a garbage Integer, :sym -> its
+     id). A pointer/poly/float/struct return is a different type entirely.
+     A synthesized __bam_ wrapper may instead launder a String through the
+     register (a StrArray element from `[]`); its C return is `const char *`,
+     so sp_bm_box_ret's String kind boxes it correctly. Allow only the
+     wrapper shape, where spinel owns the ABI. */
+  if (m->ret == TY_INT) { if (out_ret) *out_ret = 0; /* SP_BM_RET_INT */ }
+  else if (m->ret == TY_STRING && is_bam) { if (out_ret) *out_ret = 1; /* SP_BM_RET_STR */ }
+  else return 0;
+  /* An explicit `&blk` adds a trailing sp_Proc* C parameter the legacy cast
+     does not supply, so the callee would read garbage for it. */
+  if (m->blk_param && m->blk_param[0] && !m->yields) return 0;
+  /* A class method whose C signature leads with `sp_Class _sp_cls` because a
+     descendant exists and the body reads self/name (cmethod_takes_self_cls)
+     would take the first real argument as that class -- every argument shifts
+     by one. The poly Method path passes no such leading argument (#4395). */
+  if (cmethod_takes_self_cls(c, mi)) return 0;
+  /* A keyword-rest or post-rest parameter changes the arity the C signature
+     reads: a call passing fewer args than the signature has leaves the callee
+     reading an undefined register instead of raising. */
+  if (m->kwrest_idx >= 0 || m->npost_rest > 0) return 0;
+  /* A rest parameter's C slot is ONE sp_PolyArray*, not one sp_int per
+     call-site argument: the callee signature has an extra trailing pointer
+     the legacy cast cannot supply. Even when the body never reads the rest
+     variable, the callee prologue roots the parameter unconditionally
+     (emit_scope_decls emits SP_GC_ROOT(lv_<rest>)), so the garbage register
+     the cast left there is handed to the collector on the next allocation
+     and sp_gc_mark dereferences it -- a segfault. Supplying a real rest array
+     would require dispatching on the target's fixed arity at run time, which
+     the static cast cannot do, so decline every rest parameter (named or
+     anonymous). */
+  if (m->rest_idx >= 0) return 0;
+  if (m->def_node >= 0) {
+    int pn = nt_ref(c->nt, m->def_node, "parameters");
+    if (pn >= 0) {
+      int nk = 0;
+      nt_arr(c->nt, pn, "keywords", &nk);
+      /* Any keyword parameter (optional or required) is matched by name in
+         CRuby; the positional legacy ABI would feed it a positional argument
+         or nothing. */
+      if (nk > 0) return 0;
+      if (nt_ref(c->nt, pn, "keyword_rest") >= 0) return 0;
+    }
+  }
+  /* Classify every fixed parameter against the sp_int register the legacy
+     cast writes. All-scalar (int/bool/symbol/nil/untyped) and all-pointer
+     (heap object / Proc) targets are each safe for a matching argument list;
+     a float or by-value struct does not fit the register at all, so those
+     decline. The call site knows each argument's class, so the target's
+     per-position C type is stamped as a token in *out_sig and compared
+     positionally -- a mixed list is callable when each position's type
+     agrees (a pointer argument fed to an untyped `sp_int` parameter, or a
+     pointer of the wrong kind, is still declined -- #4395). */
+  /* The fixed positional C slots: every parameter. A rest parameter always
+     declined above, so none reaches here and the trailing rest pointer the
+     cast cannot supply is never a factor. */
+  int nfixed = m->nparams - pstart;
+  if (nfixed > 62) return 0;   /* no room in the signature */
+  int off = 0;
+  /* eight chars per token; see abi_sig_token */
+  for (int k = pstart; k < pstart + nfixed; k++) {
+    TyKind pt = TY_INT;
+    if (m->pnames && m->pnames[k]) {
+      LocalVar *lv = scope_local(m, m->pnames[k]);
+      pt = lv ? lv->type : TY_INT;
+      if (pt == TY_POLY || pt == TY_FLOAT || proc_slot_via_poly(c, pt)) return 0;
+      if (!proc_slot_is_direct(pt) && pt != TY_PROC && !proc_slot_is_ptr(pt)) return 0;
+    }
+    abi_sig_token(pt, out_sig + off);
+    off += 8;
+  }
+  out_sig[off] = 0;
+  *out_fixed = nfixed;
+  *out_rest = 0;
+  return 1;
+}
+
+/* Emit the runtime test for a bound Method that may ride the legacy sp_int
+   path. `tmp` holds the boxed receiver; `arg_sig` is the call site's
+   per-position ABI type token sequence. A fixed signature requires exactly
+   argc arguments; the target was already vetted in method_legacy_int_abi.
+   The per-position type comparison lives in sp_bm_legacy_abi_ok. */
+static void emit_bm_legacy_ok(Buf *b, int tmp, int argc, const char *arg_sig) {
+  buf_printf(b, "sp_bm_legacy_abi_ok((sp_BoundMethod *)_t%d.v.p, %d, \"%s\")",
+             tmp, argc, arg_sig);
+}
+/* Compute a call site's per-position ABI type tokens (see abi_sig_token).
+   Returns 0 when an argument cannot ride the legacy slot at all (poly /
+   float / by-value struct), so the caller knows the Method arm cannot be
+   claimed. */
+static int call_arg_sig(Compiler *c, const int *argv, int argc, char *out, size_t cap) {
+  if (argc > 62) return 0;   /* no room in the signature */
+  if ((size_t)(argc * 8 + 1) > cap) return 0;
+  for (int k = 0; k < argc; k++) {
+    TyKind at = comp_ntype(c, argv[k]);
+    if (at == TY_POLY || at == TY_FLOAT || proc_slot_via_poly(c, at)) return 0;
+    abi_sig_token(at, out + 8 * k);
+  }
+  out[8 * argc] = 0;
+  return 1;
+}
+/* Append `, recv_bound, abi, sig, fixed, rest, ret)` closing a
+   sp_bm_set_abi(...) around a just-emitted sp_bound_method_new* constructor.
+   `rb` is a C expression for the receiver-bound flag (a literal, or a copy
+   from another Method in super_method's case). */
+static void emit_bm_abi_args(Buf *b, const char *rb, int abi, const char *sig, int fixed, int rest, int ret) {
+  if (abi && sig) buf_printf(b, ", %s, %d, \"%s\", %d, %d, %d)", rb, abi, sig, fixed, rest, ret);
+  else buf_printf(b, ", %s, 0, NULL, 0, 0, 0)", rb);
+}
+
+/* A poly slot can hold a boxed callable: a Proc, a curried Proc, or a bound
+   Method. When some user class ALSO defines `call` (or `[]`), the cls_id
+   switch in emit_poly_method_dispatch below carries an arm per user class
+   only -- a boxed callable matches none of them and hit the NoMethodError
+   default, which is how `Defer#call` over an untyped @blocks array raised
+   `undefined method 'call' for an instance of Proc`. Route a callable
+   receiver through the existing callable machinery ahead of the switch, the
+   same way the class-value / container pre-arms do. Applies to `call`, `()`
+   and `[]` (Proc#[] IS #call). Positional only: a keyword split (kwh >= 0)
+   has arguments already matched against a specific user candidate and keeps
+   falling through to the user arms, and a splatted argument is left to the
+   pre-existing (unsupported) dispatch path rather than published as one
+   argument. Emits
+   `if (<tag/cls is callable>) { <tr> = <expr>; }\nelse ` and returns 1 when
+   emitted, 0 (nothing written) otherwise. */
+static int emit_poly_callable_prearm(Compiler *c, const char *name, int argc,
+                                     const int *atmp, const TyKind *atmp_ty,
+                                     int tv, int tr, TyKind ret, Buf *b) {
+  if (!name ||
+      !(sp_streq(name, "call") || sp_streq(name, "()") || sp_streq(name, "[]")))
+    return 0;
+  /* The callable ABI packs at most 16 positional args into sp_int[16]; the
+     publish loop below would write _sp_proc_poly_args[16] out of bounds and
+     the compound literal would have 17+ initializers (a hard error under
+     -Werror). Decline for a wider call so the user-class switch arms still
+     serve a user receiver (matching this path before the pre-arm existed); a
+     callable in the slot then raises NoMethodError as it did before (#4395). */
+  if (argc > 16) return 0;
+  /* A Curry reads its arguments from the one-global _sp_proc_poly_args
+     channel, so publish the boxed args as a comma sequence immediately in
+     front of the call. It is collected (not emitted as a standalone
+     statement) because an argument that is itself a call clobbers the
+     channel, and its callee's prologue then clears it (#4059, #4333). */
+  Buf pubs; memset(&pubs, 0, sizeof pubs);
+  if (argc > 0) {
+    g_needs_proc_poly_argslot = 1;
+    for (int k = 0; k < argc; k++) {
+      char tn[24]; snprintf(tn, sizeof tn, "_t%d", atmp[k]);
+      buf_printf(&pubs, "_sp_proc_poly_args[%d] = ", k);
+      if (atmp_ty[k] == TY_POLY) buf_puts(&pubs, tn);
+      else emit_boxed_text(c, atmp_ty[k], tn, &pubs);
+      buf_puts(&pubs, ", ");
+    }
+  }
+  /* Build the boxed callable expression once, then assign (unboxing when the
+     slot the dispatch writes is concrete) so both result shapes share it. */
+  Buf eb; memset(&eb, 0, sizeof eb);
+  if (pubs.p) { buf_puts(&eb, "("); buf_puts(&eb, pubs.p); }
+  int mabi_poly = g_promote_mode;
+  const char *aty = mabi_poly ? "sp_RbVal" : "sp_int";
+  /* The sp_int slot the legacy Proc ABI reads: a Proc/Curry callee reads the
+     real boxed value back from the side channel, so a poly slot is laundered
+     to an int, a pointer rides as an integer, and a float / poly-riding slot
+     passes 0. A bound Method reads none of that side channel: it is a plain C
+     function, so those same slots would hand it 0 or an int where it expects
+     a float / by-value struct. method_ok below therefore keeps METHOD out of
+     the outer test whenever an argument cannot ride the sp_int ABI. */
+  #define PA_SLOT(k) do { \
+    TyKind _at = atmp_ty[k]; \
+    if (_at == TY_POLY) buf_printf(&eb, "sp_poly_to_i(_t%d)", atmp[k]); \
+    else if (proc_slot_is_ptr(_at) || _at == TY_PROC) buf_printf(&eb, "(sp_int)(uintptr_t)_t%d", atmp[k]); \
+    else if (_at == TY_FLOAT || proc_slot_via_poly(c, _at)) buf_puts(&eb, "0"); \
+    else buf_printf(&eb, "_t%d", atmp[k]); \
+  } while (0)
+  /* Under promote the bound Method is poly-signatured, so it takes boxed
+     arguments (already hoisted into atmp) rather than the legacy slots. */
+  #define PA_MARG(k) do { \
+    if (mabi_poly) { \
+      if (atmp_ty[k] == TY_POLY) buf_printf(&eb, "_t%d", atmp[k]); \
+      else { char _tn[24]; snprintf(_tn, sizeof _tn, "_t%d", atmp[k]); \
+             emit_boxed_text(c, atmp_ty[k], _tn, &eb); } \
+    } else PA_SLOT(k); \
+  } while (0)
+  /* The bound Method may wrap an instance method (self-ful: fn(self, args))
+     or a top-level def (self-less: fn(args), NULL self); pick at run time so a
+     top-level Method is not handed a spurious leading self. Both the legacy
+     sp_int result and the promote sp_RbVal result are boxed to sp_RbVal so
+     the Proc arm and the Method arm have one C type. The legacy box is
+     sp_bm_box_ret, which reads the Method's stamped Ruby return kind, so a
+     typed-array adapter that answers an array/string is not mis-tagged as an
+     Integer (#4395). */
+  char boxopen[64];
+  if (mabi_poly) boxopen[0] = 0;
+  else snprintf(boxopen, sizeof boxopen, "sp_bm_box_ret((sp_BoundMethod *)_t%d.v.p, ", tv);
+  buf_printf(&eb, "(_t%d.cls_id == SP_BUILTIN_METHOD ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", tv, tv);
+  buf_printf(&eb, "%s((%s (*)(void *", boxopen, aty);
+  for (int k = 0; k < argc; k++) buf_printf(&eb, ", %s", aty);
+  buf_printf(&eb, "))(uintptr_t)((sp_BoundMethod *)_t%d.v.p)->fn)((void *)((sp_BoundMethod *)_t%d.v.p)->self", tv, tv);
+  for (int k = 0; k < argc; k++) { buf_puts(&eb, ", "); PA_MARG(k); }
+  buf_printf(&eb, ")%s : ", mabi_poly ? "" : ")");
+  buf_printf(&eb, "%s((%s (*)(", boxopen, aty);
+  for (int k = 0; k < argc; k++) buf_printf(&eb, "%s%s", k ? ", " : "", aty);
+  if (argc == 0) buf_puts(&eb, "void");
+  buf_printf(&eb, "))(uintptr_t)((sp_BoundMethod *)_t%d.v.p)->fn)(", tv);
+  for (int k = 0; k < argc; k++) { if (k) buf_puts(&eb, ", "); PA_MARG(k); }
+  buf_printf(&eb, ")%s)", mabi_poly ? "" : ")");
+  /* Proc/Curry go through the callable helper, which raises NoMethodError for
+     anything that is not a Proc rather than reading it as one. */
+  buf_printf(&eb, " : sp_poly_callable_call(_t%d, %d, (sp_int[16]){", tv, argc);
+  for (int k = 0; k < argc; k++) { if (k) buf_puts(&eb, ", "); PA_SLOT(k); }
+  if (argc == 0) buf_puts(&eb, "0");
+  buf_puts(&eb, "}))");
+  if (pubs.p) buf_puts(&eb, ")");
+  #undef PA_SLOT
+  #undef PA_MARG
+  /* Under promote the Method is poly-signatured, so PA_MARG passes it boxed
+     values and the legacy-slot limitation does not apply. Otherwise a Method
+     can be claimed when the call-site argument classes match the target's
+     stamped per-position class: an sp_int scalar rides the slot, a bare
+     pointer rides the (sp_int)(uintptr_t) launder, and a mixed list is fine
+     as long as each position agrees. A float / by-value struct / poly argument
+     cannot be classified and declines. The target property is stamped by
+     method_legacy_int_abi at bind time; the call site cannot see it. A Method
+     that fails either test falls through to the dispatch's NoMethodError
+     default rather than being called with an ABI it cannot read. */
+  int method_ok = 1;
+  char method_sig[8 * 64 + 1];
+  method_sig[0] = 0;
+  if (!mabi_poly) {
+    if (argc > 62) method_ok = 0;
+    for (int k = 0; method_ok && k < argc; k++) {
+      TyKind _at = atmp_ty[k];
+      if (_at == TY_POLY || _at == TY_FLOAT || proc_slot_via_poly(c, _at)) {
+        method_ok = 0;
+        break;
+      }
+      abi_sig_token(_at, method_sig + 8 * k);
+    }
+    if (method_ok) method_sig[8 * argc] = 0;
+  }
+  buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && (_t%d.cls_id == SP_BUILTIN_PROC"
+                " || _t%d.cls_id == SP_BUILTIN_CURRY", tv, tv, tv);
+  if (method_ok) {
+    if (mabi_poly) buf_printf(b, " || _t%d.cls_id == SP_BUILTIN_METHOD", tv);
+    else {
+      buf_printf(b, " || (_t%d.cls_id == SP_BUILTIN_METHOD && ", tv);
+      emit_bm_legacy_ok(b, tv, argc, method_sig);
+      buf_puts(b, ")");
+    }
+  }
+  buf_printf(b, ")) { _t%d = ", tr);
+  if (ret == TY_POLY) buf_puts(b, eb.p ? eb.p : "");
+  else emit_unbox_poly_ret(c, ret, eb.p ? eb.p : "", b);
+  buf_puts(b, "; }\nelse ");
+  free(pubs.p); free(eb.p);
+  return 1;
+}
+
 static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
   /* Re-entered from this very dispatch's builtin-container arm: decline, so
      the call falls through to the builtin emitters the arm is there to
@@ -4971,6 +5317,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           else emit_unbox_text(c, ret, pcall, b);
           buf_puts(b, "; }\nelse ");
         } }
+      /* a boxed Proc/Curry/Method in a slot a user `call`/`[]` shadows (#4395) */
+      emit_poly_callable_prearm(c, name, 0, NULL, NULL, tv, tr, ret, b);
       int cls0_d = -1, cls0_rd = -1;
       int cls0_mi = c->nclasses > 0 ? comp_method_in_chain(c, 0, name, &cls0_d) : -1;
       int cls0_cand = ((cls0_mi >= 0 && c->scopes[cls0_mi].nrequired == 0) ||
@@ -5916,6 +6264,15 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
             (scope_has_callable_symbol(c, pmi) || scope_needs_proc_form(c, pmi)))
           prim_cand2 = 1;
       }
+      /* a boxed Proc/Curry/Method in a slot a user `call`/`[]` shadows (#4395);
+         the keyword split binds by name to a user candidate, so skip it. A
+         splatted argument is one temp holding an array, not one temp per
+         value, so the positional publish sequence below cannot spread it --
+         the shadowed-call path has never handled a splat (the dispatch's arg
+         hoisting does not model one), and routing the whole array as a single
+         argument would only be silently wrong. */
+      if (kwh < 0 && !has_splat_arg)
+        emit_poly_callable_prearm(c, name, argc, atmp, atmp_ty, tv, tr, ret, b);
       buf_puts(b, "switch (");
       emit_poly_dispatch_key(c, tv, cls0_cand2, prim_cand2, b);
       buf_puts(b, ") {");
@@ -16414,15 +16771,22 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       return;
     }
   }
-  /* poly_val.call — the poly value is a proc; unbox then call.
-     Only applies when no user-defined class has a `call` method (otherwise
-     use the existing poly dispatch switch which handles user-defined call). */
+  /* poly_val.call — the poly value is a proc; unbox then call. Only applies
+     when no user-defined class has a `call` method: when one does, the poly
+     method dispatch carries a callable pre-arm that routes a boxed Proc/Curry/
+     Method through this same machinery, and the user classes take their switch
+     arms (#4395). */
   if (recv >= 0 && comp_ntype(c, recv) == TY_POLY &&
       (sp_streq(name, "call") || sp_streq(name, "()"))) {
     int has_user_call = 0;
     for (int _k = 0; _k < c->nclasses && !has_user_call; _k++)
       if (comp_method_in_class(c, _k, name) >= 0) has_user_call = 1;
-    if (!has_user_call) {
+    /* The callable ABI packs at most 16 positional args into sp_int[16];
+       beyond that the publish loop writes _sp_proc_poly_args[16] out of
+       bounds and the compound literal has 17+ initializers (a hard -Werror
+       failure). Decline to the general dispatch for a wider call, matching
+       the shadowed pre-arm (#4395). */
+    if (!has_user_call && argc <= 16) {
       int t = ++g_tmp;
       /* Render first, then write the line. emit_expr may need g_pre lines of
          its own -- a container literal builds itself there -- and writing
@@ -16541,9 +16905,34 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
          read out of a container is not invoked with a spurious leading self
          arg -- which would shift every real argument by one (#3231). */
       if (pubs.p) { buf_puts(b, "("); buf_puts(b, pubs.p); }
-      buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD ? (((sp_BoundMethod *)_t%d.v.p)->self != NULL ? ", t, t);
+      /* A Method whose target cannot read the argument class, or whose
+         stamped per-position class differs, cannot be invoked through the
+         cast below: its fn signature reads the arg registers as the wrong
+         types (garbage or a crash). The bind sites stamp the target's class
+         mask and arity, and a Method that does not match falls to the Proc
+         arm's sp_poly_callable_call, which raises CRuby's NoMethodError.
+         In promote mode every method is poly-signatured, so the flag is not
+         consulted. */
+      int method_ok = 1;
+      char method_sig[8 * 64 + 1];
+      method_sig[0] = 0;
+      if (!mabi_poly) method_ok = call_arg_sig(c, argv, argc, method_sig, sizeof method_sig);
+      /* The legacy box reads the Method's stamped Ruby return kind, so a
+         typed-array adapter that answers an array/string is not mis-tagged as
+         an Integer (#4395). */
+      char boxopen[64];
+      if (mabi_poly) boxopen[0] = 0;
+      else snprintf(boxopen, sizeof boxopen, "sp_bm_box_ret((sp_BoundMethod *)_t%d.v.p, ", t);
+      if (mabi_poly)
+        buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", t, t);
+      else {
+        buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD && ", t);
+        if (method_ok) emit_bm_legacy_ok(b, t, argc, method_sig);
+        else buf_puts(b, "0");
+        buf_printf(b, " ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", t);
+      }
       /* self-ful arm: fn((void *)self, args...) */
-      buf_printf(b, "%s((%s (*)(void *", mabi_poly ? "" : "sp_box_int(", aty);
+      buf_printf(b, "%s((%s (*)(void *", boxopen, aty);
       for (int k = 0; k < argc; k++) buf_printf(b, ", %s", aty);
       buf_printf(b, "))(uintptr_t)((sp_BoundMethod *)_t%d.v.p)->fn)((void *)((sp_BoundMethod *)_t%d.v.p)->self", t, t);
       for (int k = 0; k < argc; k++) {
@@ -16553,7 +16942,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       buf_printf(b, ")%s : ", mabi_poly ? "" : ")");
       /* self-less arm: fn(args...) with no leading self */
-      buf_printf(b, "%s((%s (*)(", mabi_poly ? "" : "sp_box_int(", aty);
+      buf_printf(b, "%s((%s (*)(", boxopen, aty);
       for (int k = 0; k < argc; k++) buf_printf(b, "%s%s", k ? ", " : "", aty);
       if (argc == 0) buf_puts(b, "void");
       buf_printf(b, "))(uintptr_t)((sp_BoundMethod *)_t%d.v.p)->fn)(", t);
@@ -16625,13 +17014,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (sp_streq(name, "instance_method") && method_sym_arg(c, id) != NULL) {
     int umi = method_obj_target_mi(c, id);
     if (umi >= 0) {
-      buf_puts(b, "sp_bound_method_new_d(NULL, SP_BM_SELF_NONE, (sp_int)(uintptr_t)&");
+      buf_puts(b, "sp_bm_set_unbound(sp_bm_set_abi(sp_bound_method_new_d(NULL, SP_BM_SELF_NONE, (sp_int)(uintptr_t)&");
       emit_method_cname(c, &c->scopes[umi], b);
       buf_puts(b, ", ");
       emit_str_literal(b, method_sym_arg(c, id));
       { int ar; if (method_scope_arity(c, umi, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", SP_INT_NIL"); }
       { char _db[512]; BUILD_METHOD_DESC(umi, method_sym_arg(c, id), 1, _db);
         buf_puts(b, ", "); emit_str_literal(b, _db); }
+      buf_puts(b, ")");
+      { char _s[8 * 64 + 1]; int _fx = 0, _rs = 0, _rt = 0;
+        int _ab = method_legacy_int_abi(c, umi, 0, _s, sizeof _s, &_fx, &_rs, &_rt);
+        emit_bm_abi_args(b, "0", _ab, _s, _fx, _rs, _rt); }
       buf_puts(b, ")");
       return;
     }
@@ -16663,13 +17056,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     int tvu = ++g_tmp;
     buf_printf(b, "({ sp_BoundMethod *_t%d = ", tvu);
     emit_expr(c, recv, b);
-    buf_printf(b, "; sp_bound_method_new_d(NULL, SP_BM_SELF_NONE, _t%d->fn, _t%d->name, _t%d->arity, ", tvu, tvu, tvu);
+    buf_printf(b, "; sp_bm_set_unbound(sp_bm_set_abi(sp_bound_method_new_d(NULL, SP_BM_SELF_NONE, _t%d->fn, _t%d->name, _t%d->arity, ", tvu, tvu, tvu);
     if (tmu >= 0) {
       char _db[512]; BUILD_METHOD_DESC(tmu, method_sym_arg(c, mnu), 1, _db);
       emit_str_literal(b, _db);
     }
     else buf_puts(b, "NULL");
-    buf_puts(b, "); })");
+    buf_printf(b, "), 0, _t%d->legacy_int_abi, _t%d->legacy_sig, _t%d->legacy_fixed, _t%d->legacy_rest, _t%d->legacy_ret)); })", tvu, tvu, tvu, tvu, tvu);
     return;
   }
   /* Method#super_method: the same-named method one step up the ancestor
@@ -16690,15 +17083,22 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int tvp = ++g_tmp;
       buf_printf(b, "({ sp_BoundMethod *_t%d = ", tvp);
       emit_expr(c, recv, b);
-      buf_printf(b, "; sp_bound_method_new_d(_t%d->self, _t%d->self_kind, (sp_int)(uintptr_t)&", tvp, tvp);
+      int sup_unb = method_expr_is_unbound(c, recv);
+      buf_printf(b, "; %ssp_bm_set_abi(sp_bound_method_new_d(_t%d->self, _t%d->self_kind, (sp_int)(uintptr_t)&", sup_unb ? "sp_bm_set_unbound(" : "", tvp, tvp);
       emit_method_cname(c, &c->scopes[pmip], b);
       buf_puts(b, ", ");
       emit_str_literal(b, c->scopes[pmip].name ? c->scopes[pmip].name : "?");
       { int ar; if (method_scope_arity(c, pmip, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", SP_INT_NIL"); }
       { char _db[512];
-        BUILD_METHOD_DESC(pmip, c->scopes[pmip].name, method_expr_is_unbound(c, recv), _db);
+        BUILD_METHOD_DESC(pmip, c->scopes[pmip].name, sup_unb, _db);
         buf_puts(b, ", "); emit_str_literal(b, _db); }
-      buf_puts(b, "); })");
+      buf_puts(b, ")");
+      { char _s[8 * 64 + 1]; int _fx = 0, _rs = 0, _rt = 0;
+        int _ab = method_legacy_int_abi(c, pmip, !sup_unb, _s, sizeof _s, &_fx, &_rs, &_rt);
+        char _rbb[32]; snprintf(_rbb, sizeof _rbb, "_t%d->recv_bound", tvp);
+        emit_bm_abi_args(b, _rbb, _ab, _s, _fx, _rs, _rt); }
+      if (sup_unb) buf_puts(b, ")");
+      buf_puts(b, "; })");
     }
     else {
       buf_puts(b, "((void)(");
@@ -16751,7 +17151,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     int mn2 = method_recv_node(c, recv);
     int t2 = mn2 >= 0 ? method_obj_target_mi(c, mn2) : -1;
     if (t2 >= 0 && ty_is_object(comp_ntype(c, argv[0]))) {
-      buf_puts(b, "sp_bound_method_new_d((void *)(");
+      buf_puts(b, "sp_bm_set_abi(sp_bound_method_new_d((void *)(");
       emit_expr(c, argv[0], b);
       buf_puts(b, "), SP_BM_SELF_OBJ, (sp_int)(uintptr_t)&");
       emit_method_cname(c, &c->scopes[t2], b);
@@ -16761,6 +17161,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       { char _db[512]; BUILD_METHOD_DESC(t2, method_sym_arg(c, mn2), 0, _db);
         buf_puts(b, ", "); emit_str_literal(b, _db); }
       buf_puts(b, ")");
+      { char _s[8 * 64 + 1]; int _fx = 0, _rs = 0, _rt = 0;
+        int _ab = method_legacy_int_abi(c, t2, 1, _s, sizeof _s, &_fx, &_rs, &_rt);
+        emit_bm_abi_args(b, "1", _ab, _s, _fx, _rs, _rt); }
       return;
     }
   }
@@ -16768,10 +17171,54 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
   if (sp_streq(name, "method") && method_sym_arg(c, id) != NULL) {
     const char *sym = method_sym_arg(c, id);
     int mi = method_obj_target_mi(c, id);
+    /* A poly receiver has no statically-known class, so method_obj_target_mi
+       resolves nothing (mi < 0), there is no callable address to bind, and
+       the boxed sp_RbVal is not a C pointer: the `(void *)(<expr>)` self slot
+       below did not even compile (`cannot convert to a pointer type`). This
+       became reachable when a poly `.call` result is typed poly (#4395):
+       `o = arr[0].call; o.method(:foo)` used to key off the user `call`'s
+       return type and stayed concrete. Raise CRuby's NoMethodError instead of
+       failing the build. A poly `<recv>.method` never bound a real target
+       (the emitted fn was 0), so this only moves the failure from the C
+       compiler to a clean runtime error. */
+    if (recv >= 0 && comp_ntype(c, recv) == TY_POLY) {
+      buf_puts(b, "({ sp_RbVal _rpm = ");
+      emit_expr(c, recv, b);
+      buf_puts(b, "; SP_GC_ROOT_RBVAL(_rpm); sp_raise_cls(\"NoMethodError\", sp_nomethod_msg(");
+      emit_str_literal(b, sym);
+      buf_puts(b, ", _rpm)); (sp_BoundMethod *)0; })");
+      return;
+    }
     /* bare method(:sym) on an instance method binds the current self */
     int self_bound = (recv < 0 && mi >= 0 && c->scopes[mi].class_id >= 0 &&
                       !c->scopes[mi].is_cmethod);
-    buf_puts(b, mi >= 0 ? "sp_bound_method_new_d(" : "sp_bound_method_new(");
+    /* Whether this Method's target can ride the legacy sp_int poly-call ABI.
+       A typed-array adapter (mi < 0, bop below) is legacy in non-promote
+       mode; an unresolved builtin (no callable address) must not claim it.
+       `recv_bound` tells the classifier whether a __bam_ wrapper's self slot
+       carries its first parameter: a receiver-bound builtin/accessor wrapper
+       is wrapped with self, a receiverless Kernel wrapper with NULL self. */
+    /* The target's C ABI takes the bound receiver in the leading slot: true
+       for every non-class receiver (a value receiver of 0 has self == NULL but
+       is still bound) and for a bare method(:sym) bound to the enclosing
+       instance; false for a top-level method, a class method, or a
+       receiverless Kernel wrapper. Persisted on the Method (#4395) because the
+       raw `self != NULL` test cannot recover it later. */
+    int recv_bound = recv >= 0 ? (comp_ntype(c, recv) != TY_CLASS) : (self_bound ? 1 : 0);
+    int mi_legacy = 0;
+    char mi_sig[8 * 64 + 1]; mi_sig[0] = 0;
+    int mi_fixed = 0, mi_rest = 0, mi_ret = 0;
+    if (mi >= 0) mi_legacy = method_legacy_int_abi(c, mi, recv_bound,
+                                                   mi_sig, sizeof mi_sig, &mi_fixed, &mi_rest, &mi_ret);
+    int bop_argc = -1;  /* typed-array adapter fixed-slot count, set below */
+    int bop_rest = 0;   /* typed-array adapters have no rest slot */
+    /* Keep in step with SP_BM_RET_* in lib/sp_proc.h: how the adapter's sp_int
+       C return boxes back into a Ruby value. IntArray get/set return the int
+       element; the other adapters launder the array or a String through the
+       register and must not be boxed as Integers (#4395). */
+    int bop_ret = 0;    /* SP_BM_RET_INT */
+    char bop_sig[8 * 64 + 1]; bop_sig[0] = 0;  /* typed-array adapter ABI signature */
+    buf_puts(b, mi >= 0 ? "sp_bm_set_abi(sp_bound_method_new_d(" : "sp_bm_set_abi(sp_bound_method_new(");
     /* A Method bound to a class/module (Klass.method(:cmeth)) has no instance
        self -- the class value is not a heap pointer, so pass NULL. */
     const char *self_kind = "SP_BM_SELF_NONE";
@@ -16801,10 +17248,26 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         else if (sp_streq(sym, "push")) bop = "push";
       }
       if (bop) {
+        mi_legacy = 1;
+        bop_argc = (bop[0] == 's') ? 2 : 1;  /* set=2, get/push=1 */
         /* memoized per (kind, op): emit the adapter once */
         static char bam_done[2][3];
         int ki = (brt == TY_INT_ARRAY) ? 0 : 1;
         int oi = bop[0] == 'g' ? 0 : bop[0] == 's' ? 1 : 2;
+        /* The non-promote adapter's Ruby return: an IntArray adapter answers
+           an int (the element / the assigned value) except push, which
+           answers the array; a StrArray adapter answers a String for get/set
+           (laundered through the register) and the array for push. */
+        bop_ret = (ki == 0) ? (oi == 2 ? 2 : 0) : (oi == 2 ? 3 : 1);
+        /* A StrArray adapter launders its String element through the sp_int
+           slot: the value is arg 1 of []= and arg 0 of push. The int array
+           and the StrArray index are scalars. The stamped signature mirrors
+           the call site's argument types, not the adapter's C parameter
+           types (the element is laundered through an sp_int). */
+        for (int _q = 0; _q < bop_argc; _q++) abi_sig_token(TY_INT, bop_sig + 8 * _q);
+        if (ki == 1 && oi == 1) abi_sig_token(TY_STRING, bop_sig + 8);
+        else if (ki == 1 && oi == 2) abi_sig_token(TY_STRING, bop_sig);
+        bop_sig[8 * bop_argc] = 0;
         if (!bam_done[ki][oi]) {
           bam_done[ki][oi] = 1;
           const char *cast = (ki == 0) ? "" : "(sp_int)(uintptr_t)";
@@ -16900,6 +17363,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       buf_puts(b, ", "); emit_str_literal(b, _db);
     }
     buf_puts(b, ")");
+    { char _rbb[16]; snprintf(_rbb, sizeof _rbb, "%d", recv_bound);
+      emit_bm_abi_args(b, _rbb, mi_legacy, mi >= 0 ? mi_sig : bop_sig,
+                       mi >= 0 ? mi_fixed : bop_argc, mi >= 0 ? mi_rest : bop_rest,
+                       mi >= 0 ? mi_ret : bop_ret); }
     return;
   }
   /* <method>.to_proc wraps the bound method in a trampoline Proc. When the
@@ -17351,13 +17818,18 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                        : mrt == TY_FLOAT ? "Float" : mrt == TY_SYMBOL ? "Symbol"
                        : ty_is_array(mrt) ? "Array" : ty_is_hash(mrt) ? "Hash"
                        : mrt == TY_RANGE ? "Range" : mrt == TY_TIME ? "Time" : NULL;
-      int ba;
-      if (msym && mcls && builtin_method_arity(mcls, msym, &ba)) {
+      int ba = 0, have_ba = 0;
+      if (msym && mcls && builtin_method_arity(mcls, msym, &ba)) have_ba = 1;
+      /* A receiverless Kernel wrapper (`method(:String)`) has no receiver
+         class; the builtin's real arity is keyed under "Kernel" (#4395). */
+      else if (is_bam && mrecv < 0 && msym && builtin_method_arity("Kernel", msym, &ba)) have_ba = 1;
+      if (have_ba) {
         /* evaluate for effect: the method()'s own receiver when the chain is
            inline (creating the bound method emits a non-void-castable
            expression), or the local read when the method object is var-held */
         buf_printf(b, "((void)(");
-        if (mn == recv) emit_expr(c, mrecv, b); else emit_expr(c, recv, b);
+        if (mn == recv) { if (mrecv >= 0) emit_expr(c, mrecv, b); else buf_puts(b, "0"); }
+        else emit_expr(c, recv, b);
         buf_printf(b, "), (sp_int)%d)", ba);
         return;
       }
@@ -17660,7 +18132,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     /* A top-level def has a self-less C ABI (fn(args)); an object-bound method
        is fn(self, args). The bound method carries a NULL self for the former. */
   bm_emit_call:
-    buf_printf(b, "_t%d->self != NULL ? ", tr);
+    buf_printf(b, "_t%d->recv_bound ? ", tr);
     for (int arm = 0; arm < 2; arm++) {
       if (arm) buf_puts(b, " : ");
       buf_puts(b, "(("); emit_ctype(c, tret, b); buf_puts(b, " (*)(");

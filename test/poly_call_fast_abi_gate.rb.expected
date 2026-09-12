@@ -1,0 +1,35 @@
+3
+5
+arity: NoMethodError
+rest_unused: NoMethodError
+rest_anon: NoMethodError
+rest_aref: NoMethodError
+rest_slice: NoMethodError
+cmethod: NoMethodError
+5
+7
+7
+1
+9
+9
+["x", "y"]
+["x", "y"]
+"z"
+["z", "y"]
+[1, 2, 3]
+[1, 2, 3]
+x
+nil
+slice_arity: NoMethodError
+index_arity: NoMethodError
+ptr_mismatch: NoMethodError
+ptr_mismatch2: NoMethodError
+unbound_call: NoMethodError
+unbound_aref: NoMethodError
+3
+7
+optional_short: NoMethodError
+adapter_arity: nil
+3
+6
+6

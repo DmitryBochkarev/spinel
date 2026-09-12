@@ -66,17 +66,109 @@ void sp_curry_publish_args(sp_Curry *c);
 #define SP_BM_SELF_NONE 0   /* not a reference: a number, a class value, unbound */
 #define SP_BM_SELF_OBJ  1
 #define SP_BM_SELF_STR  2
+/* How the legacy sp_int C return is boxed back into a Ruby value. A regular
+   method riding the cast can only return TY_INT, but a synthesized typed-array
+   adapter (`<int_array>.method(:push)`) has an sp_int C return whose Ruby value
+   is the array/string it launder through the register. */
+#define SP_BM_RET_INT       0
+#define SP_BM_RET_STR       1
+#define SP_BM_RET_INT_ARRAY 2
+#define SP_BM_RET_STR_ARRAY 3
 typedef struct sp_BoundMethod { void *self; sp_int fn; const char *name; sp_int arity;
   const char *desc;   /* compile-time #inspect rendering ("#<Method: Owner#name(params)>"), or NULL */
   sp_int self_kind;  /* SP_BM_SELF_* */
   sp_int unbound;    /* built by #unbind on a boxed Method: reports UnboundMethod */
+  sp_int recv_bound; /* the target's C ABI takes the bound receiver as its leading
+                        argument, so the self-ful cast must be used even when
+                        `self` is NULL because the receiver VALUE is zero
+                        (Integer 0, false, nil) (#4395). `self != NULL` cannot
+                        tell a top-level method (self-less) from a
+                        receiver-bound wrapper whose value is 0 (#4395); this
+                        flag is the bind site's receiver-bound fact. It is
+                        independent of legacy_int_abi: an object-bound Method
+                        with a non-int return still needs its self slot. */
+  sp_int legacy_int_abi; /* whether the target can ride the legacy sp_int-cast poly-call
+                            path: 0 declines, 1 callable. A regular method is only
+                            callable with a TY_INT C return; a synthesized __bam_
+                            wrapper and the typed-array adapters may instead launder a
+                            String/array, recorded by legacy_ret. See
+                            method_legacy_int_abi (#4395). */
+  const char *legacy_sig; /* per-position C ABI type tokens, eight chars each, or NULL.
+                             Each scalar kind (int/bool/symbol/nil) has its own token,
+                             TY_UNKNOWN is the wildcard 0, and every other kind uses
+                             100000 + TyKind (an object class encodes its class id in
+                             TyKind), so a bool parameter never accepts an int and a
+                             String parameter never accepts an IntArray. */
+  sp_int legacy_fixed;  /* number of fixed positional C slots the signature fills */
+  sp_int legacy_rest;   /* always 0 now: method_legacy_int_abi declines every rest
+                           parameter (its trailing sp_PolyArray* has no slot in the
+                           static cast), but the runtime gate keeps the rest-form
+                           check for any future caller that stamps it */
+  sp_int legacy_ret;    /* SP_BM_RET_*: how to box the sp_int C return */
 } sp_BoundMethod;
 void sp_bm_cap_scan(void *p);
 sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args);
 sp_Proc *sp_method_to_proc(sp_BoundMethod *m);
 void sp_BoundMethod_scan(void *p);
 
-static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->self_kind = self_kind; m->fn = fn; m->name = name; m->arity = arity; m->desc = NULL; m->unbound = 0; return m; }
+static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity) { sp_BoundMethod *m = (sp_BoundMethod *)sp_gc_alloc(sizeof(sp_BoundMethod), NULL, sp_BoundMethod_scan); m->self = self; m->self_kind = self_kind; m->fn = fn; m->name = name; m->arity = arity; m->desc = NULL; m->unbound = 0; m->recv_bound = 0; m->legacy_int_abi = 0; m->legacy_sig = NULL; m->legacy_fixed = 0; m->legacy_rest = 0; m->legacy_ret = SP_BM_RET_INT; return m; }
+/* Tag a freshly-built Method with whether its target has the legacy sp_int C
+   ABI, the per-position type signature, the fixed/rest slot counts, and how
+   its sp_int C return boxes. The constructors default to 0 (unsafe), so every
+   statically-known binding sets this before the Method can reach a poly slot
+   (#4395). */
+static inline sp_BoundMethod *sp_bm_set_abi(sp_BoundMethod *m, sp_int recv_bound, sp_int legacy_int_abi, const char *legacy_sig, sp_int legacy_fixed, sp_int legacy_rest, sp_int legacy_ret) { m->recv_bound = recv_bound; m->legacy_int_abi = legacy_int_abi; m->legacy_sig = legacy_sig; m->legacy_fixed = legacy_fixed; m->legacy_rest = legacy_rest; m->legacy_ret = legacy_ret; return m; }
+/* Box the raw sp_int a legacy-ABI Method returned according to the Ruby return
+   the bind site recorded. A regular method is always SP_BM_RET_INT; a typed
+   array adapter that returns self (push) or a laundered element (StrArray
+   get/set) boxes the real value instead of mis-tagging the pointer as an
+   Integer (#4395). SP_BM_RET_INT goes through sp_box_int_or_nil: an IntArray
+   `[]` out of range answers the nullable SP_INT_NIL sentinel (INTPTR_MIN),
+   which sp_box_int would hand back as a truthy Integer instead of nil, and a
+   regular TY_INT method uses the same reserved sentinel for nil (see
+   sp_poly_as_int_or_nil / sp_box_int_or_nil in sp_alloc.h) so boxing it as nil
+   is the documented invariant. */
+static inline sp_RbVal sp_bm_box_ret(sp_BoundMethod *m, sp_int raw) {
+  switch (m ? m->legacy_ret : SP_BM_RET_INT) {
+    case SP_BM_RET_STR:       return sp_box_str((const char *)(uintptr_t)raw);
+    case SP_BM_RET_INT_ARRAY: return sp_box_nullable_obj((void *)(uintptr_t)raw, SP_BUILTIN_INT_ARRAY);
+    case SP_BM_RET_STR_ARRAY: return sp_box_nullable_obj((void *)(uintptr_t)raw, SP_BUILTIN_STR_ARRAY);
+    default:                  return sp_box_int_or_nil(raw);
+  }
+}
+/* Mark a statically-built instance_method/#unbind result as an UnboundMethod,
+   so a later dynamic .call/[] through a container sees m->unbound and raises
+   instead of invoking the instance C function with no self (#4395). */
+static inline sp_BoundMethod *sp_bm_set_unbound(sp_BoundMethod *m) { if (m) m->unbound = 1; return m; }
+/* Whether a call passing `argc` arguments whose per-position ABI type tokens
+   (eight chars each; see abi_sig_token in codegen_call.c) are `arg_sig` can
+   ride the target's legacy sp_int ABI.
+   The count must fit the target's fixed signature and every fixed position's
+   C type must match exactly: a bool parameter is never handed an int, a
+   String* is never handed an IntArray*, and an sp_Foo* is never handed an
+   sp_Bar*. An optional parameter is only safe at full arity (the C signature
+   reads every fixed slot), so a shorter call declines. Declines a non-callable
+   target, an unbound Method, and a non-int return (legacy_int_abi == 0). */
+static inline sp_bool sp_bm_sig_pos_match(const char *a, const char *b) {
+  if (memcmp(a, b, 8) == 0) return TRUE;
+  /* 0 is the TY_UNKNOWN wildcard: it accepts any scalar-kind token, and a
+     scalar-kind arg accepts an unknown parameter. Pointer tokens carry the
+     100000 offset, so they never match the wildcard. */
+  sp_int va = 0, vb = 0;
+  for (int i = 0; i < 8; i++) { va = va * 10 + (a[i] - '0'); vb = vb * 10 + (b[i] - '0'); }
+  if (va == 0) return vb < 100000;
+  if (vb == 0) return va < 100000;
+  return FALSE;
+}
+static inline sp_bool sp_bm_legacy_abi_ok(sp_BoundMethod *m, sp_int argc, const char *arg_sig) {
+  if (!m || m->unbound || !m->legacy_int_abi || !m->legacy_sig || !arg_sig) return FALSE;
+  if (m->legacy_rest) { if (argc < m->legacy_fixed) return FALSE; }
+  else if (argc != m->legacy_fixed) return FALSE;
+  sp_int n = argc < m->legacy_fixed ? argc : m->legacy_fixed;
+  for (sp_int k = 0; k < n; k++)
+    if (!sp_bm_sig_pos_match(arg_sig + 8 * k, m->legacy_sig + 8 * k)) return FALSE;
+  return TRUE;
+}
 static inline sp_BoundMethod *sp_bound_method_new_d(void *self, sp_int self_kind, sp_int fn, const char *name, sp_int arity, const char *desc) { sp_BoundMethod *m = sp_bound_method_new(self, self_kind, fn, name, arity); m->desc = desc; return m; }
 /* Method#unbind on a BOXED method: the same target with the receiver dropped.
    A boxed value carries no syntax for the compile-time unbound rendering, so
@@ -86,6 +178,11 @@ static inline sp_BoundMethod *sp_bm_unbind(sp_BoundMethod *m) {
   sp_BoundMethod *u = sp_bound_method_new(NULL, SP_BM_SELF_NONE, m->fn, m->name, m->arity);
   u->desc = m->desc;
   u->unbound = 1;
+  u->legacy_int_abi = m->legacy_int_abi;
+  u->legacy_sig = m->legacy_sig;
+  u->legacy_fixed = m->legacy_fixed;
+  u->legacy_rest = m->legacy_rest;
+  u->legacy_ret = m->legacy_ret;
   return u;
 }
 
