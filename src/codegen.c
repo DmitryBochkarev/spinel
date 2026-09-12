@@ -6931,7 +6931,14 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
          marshal helper into sp_poly_inspect; an UNKNOWN (never usefully
          typed) ivar occupies an int slot in the layout and renders as its
          nil default. */
-      if (ty_is_array(ivt) && ivt != TY_POLY_ARRAY && array_kind(ivt))
+      if (ty_is_obj_array(ivt)) {
+        int eci = ty_obj_array_class(ivt);
+        int edyn = class_has_subclass(c, eci) && !class_is_exc_subclass(c, eci);
+        buf_printf(b, "(%s ? sp_ObjPtrArray_inspect(%s, %d) : \"nil\")", expr, expr, edyn ? -1 : eci);
+      }
+      else if (ivt == TY_INT_ARRAY_ARRAY)
+        buf_printf(b, "(%s ? sp_IntArrayPtrArray_inspect(%s) : \"nil\")", expr, expr);
+      else if (ty_is_array(ivt) && ivt != TY_POLY_ARRAY && array_kind(ivt))
         buf_printf(b, "(%s ? sp_%sArray_inspect(%s) : \"nil\")", expr, array_kind(ivt), expr);
       else if (ivt == TY_POLY_ARRAY)
         buf_printf(b, "(%s ? sp_PolyArray_inspect(%s) : \"nil\")", expr, expr);

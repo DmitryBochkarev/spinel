@@ -5419,6 +5419,11 @@ static sp_RbVal sp_PolyArray_sample(sp_PolyArray *a) { if (a->len <= 0) return s
    accumulator boxes each inner poly_array element), but the
    sp_PolyArray_inspect body lives a few lines below. */
 static const char *sp_PolyArray_inspect(sp_PolyArray *a);
+/* An array of one user class narrowed to a pointer array (#4444): each
+   element boxes with the class the compiler knew (cls), or with the id it
+   carries when cls is negative (a class with subclasses), and renders through
+   the same inspect a boxed element would. */
+static const char*sp_ObjPtrArray_inspect(sp_PtrArray*a,int cls){SP_GC_ROOT(a);sp_String*s=sp_String_new("[");SP_GC_ROOT(s);for(sp_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");void*e=a->data[i];sp_String_append(s,sp_poly_inspect(cls>=0?sp_box_nullable_obj(e,cls):sp_box_nullable_obj_dyn(e,0)));}sp_String_append(s,"]");return sp_str_dup(s->data);}
 static const char*sp_PolyArrayPtrArray_inspect(sp_PtrArray*a){SP_GC_ROOT(a);sp_String*s=sp_String_new("[");SP_GC_ROOT(s);for(sp_int i=0;i<a->len;i++){if(i>0)sp_String_append(s,", ");sp_String_append(s,sp_PolyArray_inspect((sp_PolyArray*)a->data[i]));}sp_String_append(s,"]");return sp_str_dup(s->data);}
 
 /* Poly-key/value hash inspect helpers are defined after sp_poly_inspect

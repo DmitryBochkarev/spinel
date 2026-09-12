@@ -2565,10 +2565,28 @@ static TyKind parse_seed_type(Compiler *c, const char *tok) {
     /* the full seed matcher, not a bare table lookup: an obj_ token names a
        class the same way a `class` seed line does (module-nested leaf,
        collision-renamed form), and must match the same set */
+    /* obj_X_ptr_array (`Array[X]`) is not a pin: see seed_obj_array_class */
     int ci = seed_class_index(c, buf + 4);
     return ci >= 0 ? ty_object(ci) : TY_UNKNOWN;
   }
   return TY_UNKNOWN;
+}
+
+/* `Array[Vec]` arrives as obj_Vec_ptr_array: the homogeneous pointer array
+   narrow_object_arrays derives from the uses. It cannot be pinned the way a
+   scalar seed is -- the unboxed form has emitters for only a few operations
+   (index, push, length, ...), and a pin on a slot that is also iterated or
+   handed out would leave codegen with no arm -- so the ivar seed arm records
+   it as a request the pass answers, and every other arm drops it as before
+   (#4444). Answers the element class, or -1 for any other token. */
+static int seed_obj_array_class(Compiler *c, const char *tok) {
+  size_t n = tok ? strlen(tok) : 0;
+  char buf[128];
+  if (n < 15 || n >= sizeof buf || strncmp(tok, "obj_", 4) != 0) return -1;
+  memcpy(buf, tok, n + 1);
+  if (!sp_streq(buf + n - 10, "_ptr_array")) return -1;
+  buf[n - 10] = '\0';
+  return seed_class_index(c, buf + 4);
 }
 
 /* Build ci's fully-qualified name as `Outer_Inner_Leaf` -- the module path
@@ -2817,8 +2835,15 @@ static void apply_rbs_seeds(Compiler *c, const char *path) {
       else cur_ci = a1 ? seed_class_index(c, a1) : -1;
     }
     else if (sp_streq(kw, "ivar") && a1 && a2 && cur_ci >= 0) {
-      TyKind t = parse_seed_type(c, a2);
-      if (t != TY_UNKNOWN) {
+      int oac = seed_obj_array_class(c, a2);
+      TyKind t = oac >= 0 ? TY_UNKNOWN : parse_seed_type(c, a2);
+      if (oac >= 0) {   /* a request for narrow_object_arrays, not a pin */
+        char ivn[300];
+        snprintf(ivn, sizeof ivn, "%s%s", a1[0] == '@' ? "" : "@", a1);
+        int idx = comp_ivar_intern(&c->classes[cur_ci], ivn);
+        c->classes[cur_ci].ivar_oa_seed[idx] = (unsigned char)(oac + 1);
+      }
+      else if (t != TY_UNKNOWN) {
         ClassInfo *ci = &c->classes[cur_ci];
         /* The extractor emits the name WITHOUT the sigil (`ivar w1 obj_Mat`),
            but ClassInfo interns parse-time ivars as `@w1`. Interning the bare
@@ -6667,10 +6692,16 @@ static int desugar_to_enum(Compiler *c) {
    Strictly conservative: any unmodeled use, class conflict, unresolved flow, or
    absent object evidence kills the component, leaving it TY_POLY_ARRAY. Runs
    ONCE, after the fixpoint, so the new type never feeds forward inference. */
-typedef struct { int sidx; LocalVar *lv; int cls; int alive; int uf; int needs_cmp; int saw_call; TyKind old_pin; } OAS;
+/* A slot is a local (lv), a method's value (lv NULL, sidx the method), or an
+   @ivar of one class (ici/iiv, sidx -1; #4444). */
+typedef struct { int sidx; LocalVar *lv; int cls; int alive; int uf; int needs_cmp; int saw_call; TyKind old_pin; int ici, iiv; } OAS;
 
 static int oa_find(OAS *sl, int n, int sidx, LocalVar *lv) {
-  for (int i = 0; i < n; i++) if (sl[i].sidx == sidx && sl[i].lv == lv) return i;
+  for (int i = 0; i < n; i++) if (sl[i].sidx == sidx && sl[i].lv == lv && sl[i].ici < 0) return i;
+  return -1;
+}
+static int oa_find_iv(OAS *sl, int n, int ici, int iiv) {
+  for (int i = 0; i < n; i++) if (sl[i].ici == ici && sl[i].iiv == iiv) return i;
   return -1;
 }
 static int oa_uf_find(OAS *sl, int i) {
@@ -6707,14 +6738,22 @@ static int oa_obj_class_of(Compiler *c, int node) {
     }
     return OA_CLS_IA;
   }
-  return -1;
+  /* A value of another CONCRETE type is evidence against one class: a String
+     or an Integer pushed or `[]=`-stored into the array puts something in it
+     the pointer array cannot hold (`a[0] = "x"` was joined as "nothing seen"
+     and the store then initialised an sp_Vec * from a string, #4444). A type
+     not known yet, nil (a NULL element) and a boxed poly value stay neutral:
+     the poly may well be the class (a widened return, #4293), and the push
+     emitter unboxes it with the class check at run time. */
+  if (t == TY_UNKNOWN || t == TY_NIL || t == TY_POLY) return -1;
+  return -2;
 }
 /* class evidence join: -1 = none seen, -2 = conflicting classes. */
 static int oa_cls_join(int a, int b) {
   if (b == -1) return a;
   if (a == -1) return b;
   if (a == b) return a;
-  return -2;
+  return -2;   /* two classes, or a foreign element (-2) from either side */
 }
 static int oa_recv_op_ok(const char *nm, int argc, int has_block) {
   if (!nm || has_block) return 0;
@@ -6945,9 +6984,11 @@ static int narrow_int_table_ivars(Compiler *c) {
      ivar_str_shared already does for the same reason. */
   for (int ci = 0; ci < c->nclasses; ci++) {
     ClassInfo *cl = &c->classes[ci];
-    for (int iv = 0; iv < cl->nivars; iv++)
-      if (cl->ivar_int_table[iv] && cl->ivar_types[iv] != TY_INT_ARRAY_ARRAY)
-        cl->ivar_types[iv] = TY_INT_ARRAY_ARRAY;
+    for (int iv = 0; iv < cl->nivars; iv++) {
+      if (!cl->ivar_int_table[iv]) continue;
+      TyKind want = cl->ivar_oa_type[iv] != TY_UNKNOWN ? cl->ivar_oa_type[iv] : TY_INT_ARRAY_ARRAY;
+      if (cl->ivar_types[iv] != want) cl->ivar_types[iv] = want;
+    }
   }
   const NodeTable *nt = c->nt;
   for (int ci = 0; ci < c->nclasses; ci++) {
@@ -7136,7 +7177,7 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
     }
     return;
   }
-  if (sp_streq(vty, "LocalVariableReadNode") && read_slot[v] >= 0) {
+  if (read_slot[v] >= 0) {   /* a local, an @ivar, or its attr_reader's value */
     claimed[v] = 1; oa_uf_union(sl, S, read_slot[v]);
     return;
   }
@@ -7150,6 +7191,18 @@ static void oa_classify_value(Compiler *c, OAS *sl, int n, const int *read_slot,
     int can = 0; if (cargs >= 0) nt_arr(nt, cargs, "arguments", &can);
     if (cn && (sp_streq(cn, "sort") || sp_streq(cn, "sort!")) && can == 0 &&
         nt_ref(nt, v, "block") < 0 && crecv >= 0 && read_slot[crecv] >= 0) {
+      claimed[crecv] = 1;
+      oa_uf_union(sl, S, read_slot[crecv]);
+    }
+    /* `slot << x` / `slot.push(x)` answer the receiver itself: a method whose
+       body is `collection << Flag.new` has that array as its value, and
+       without this edge its return slot died while its parameter narrowed,
+       leaving an sp_PtrArray body under an sp_PolyArray return. The push
+       argument is element evidence exactly as in the receiver-op arm. */
+    else if (cn && (sp_streq(cn, "<<") || sp_streq(cn, "push") || sp_streq(cn, "append")) &&
+             can >= 1 && nt_ref(nt, v, "block") < 0 && crecv >= 0 && read_slot[crecv] >= 0) {
+      int cargv_n = 0; const int *cargv = nt_arr(nt, cargs, "arguments", &cargv_n);
+      for (int a = 0; a < cargv_n; a++) sl[S].cls = oa_cls_join(sl[S].cls, oa_obj_class_of(c, cargv[a]));
       claimed[crecv] = 1;
       oa_uf_union(sl, S, read_slot[crecv]);
     }
@@ -7210,7 +7263,7 @@ static int narrow_object_arrays(Compiler *c) {
       LocalVar *lv = &sc->locals[li];
       if (lv->type != TY_POLY_ARRAY || lv->is_block_param || lv->rbs_seeded) continue;
       if (n >= cap) { cap *= 2; sl = (OAS *)realloc(sl, sizeof(OAS) * cap); if (!sl) { fprintf(stderr, "oom\n"); exit(1); } }
-      sl[n].sidx = s; sl[n].lv = lv; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0;
+      sl[n].sidx = s; sl[n].lv = lv; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0; sl[n].ici = -1; sl[n].iiv = -1;
       sl[n].old_pin = lv->oa_pin; lv->oa_pin = TY_UNKNOWN; n++;
     }
   }
@@ -7228,6 +7281,10 @@ static int narrow_object_arrays(Compiler *c) {
       sc->ret = TY_POLY_ARRAY;   /* same reset */
     if (sc->ret != TY_POLY_ARRAY || !sc->name || sc->def_node < 0) continue;
     if (sc->ret_rbs_seeded || sc->ret_specialized) continue;
+    /* `new` answers the object, never initialize's value: a constructor
+       ending in `@items << x` has no return slot to keep alive, and one that
+       joined the ivar's component through that push would only sink it */
+    if (sp_streq(sc->name, "initialize")) continue;
     if (sc->yields || sc->is_proc_form || sc->is_lowered_yield ||
         sc->cs_synth || sc->is_transplanted_source) continue;
     /* a runtime protocol enters the method with no call node to vet, and the
@@ -7235,8 +7292,46 @@ static int narrow_object_arrays(Compiler *c) {
        Money#coerce for a pair) */
     if (method_name_implicitly_invoked(sc->name)) continue;
     if (n >= cap) { cap *= 2; sl = (OAS *)realloc(sl, sizeof(OAS) * cap); if (!sl) { fprintf(stderr, "oom\n"); exit(1); } }
-    sl[n].sidx = s; sl[n].lv = NULL; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0;
+    sl[n].sidx = s; sl[n].lv = NULL; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0; sl[n].ici = -1; sl[n].iiv = -1;
     sl[n].old_pin = sc->ret_oa_pin; sc->ret_oa_pin = TY_UNKNOWN; n++;
+  }
+  /* 1c. one slot per @ivar holding a poly array (#4444). An ivar's references
+        are spread over every method of its class and can leave through an
+        attr_reader, so the slot is vetted the way narrow_int_table_ivars vets
+        a table: every read is the receiver of a modeled op or an alias edge
+        this pass follows, every write a modeled source, from methods of the
+        owning class only. A reader is not an escape by itself -- each of its
+        call sites on a receiver statically of this class is one more read of
+        the slot -- but a dynamic receiver that could dispatch to it, a symbol
+        naming it, a writer, a subclass, an ancestor that already declares the
+        ivar, or a class-level (singleton) read all keep the slot boxed. */
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    ClassInfo *cl = &c->classes[ci];
+    if (cl->def_node < 0 || nt_kind(nt, cl->def_node) == NK_ModuleNode) continue;
+    if (cl->is_struct || cl->is_data || cl->is_native_class || cl->is_value_type) continue;
+    int has_sub = 0;
+    for (int k = 0; k < c->nclasses && !has_sub; k++) if (k != ci && c->classes[k].parent == ci) has_sub = 1;
+    if (has_sub) continue;
+    for (int iv = 0; iv < cl->nivars; iv++) {
+      const char *ivn = cl->ivars[iv];
+      if (!ivn || ivn[0] != '@') continue;
+      if (cl->ivar_oa_type[iv] != TY_UNKNOWN) {
+        /* this pass's own narrowing from the last round: back on the poly
+           array, the evidence decides again (the same reset the locals get) */
+        cl->ivar_types[iv] = TY_POLY_ARRAY; cl->ivar_int_table[iv] = 0;
+      }
+      if (cl->ivar_types[iv] != TY_POLY_ARRAY || cl->ivar_int_table[iv]) continue;
+      if (class_ivar_pinned(cl, ivn)) continue;
+      const char *bare = ivn + 1;
+      if (comp_is_writer(cl, bare) || comp_is_sg_writer(cl, bare) || comp_is_sg_reader(cl, bare)) continue;
+      int inherited = 0;
+      for (int k = cl->parent; k >= 0; k = c->classes[k].parent)
+        if (comp_ivar_index(&c->classes[k], ivn) >= 0) { inherited = 1; break; }
+      if (inherited) continue;
+      if (n >= cap) { cap *= 2; sl = (OAS *)realloc(sl, sizeof(OAS) * cap); if (!sl) { fprintf(stderr, "oom\n"); exit(1); } }
+      sl[n].sidx = -1; sl[n].lv = NULL; sl[n].cls = -1; sl[n].alive = 1; sl[n].uf = n; sl[n].needs_cmp = 0; sl[n].saw_call = 0; sl[n].ici = ci; sl[n].iiv = iv;
+      sl[n].old_pin = cl->ivar_oa_type[iv]; cl->ivar_oa_type[iv] = TY_UNKNOWN; n++;
+    }
   }
   if (n == 0) { free(sl); return 0; }
   int nc = nt->count ? nt->count : 1;
@@ -7266,21 +7361,74 @@ static int narrow_object_arrays(Compiler *c) {
     if (v >= 0 && v < nc) value_ok[v] = 1;   /* alias edge made in step 5 */
   }
 
-  /* 2. map each LocalVariableReadNode of a slot to its slot index. */
+  /* 2. map each LocalVariableReadNode of a slot to its slot index. An ivar
+        slot is read by `@x` inside an instance method of its class, and by a
+        call of its attr_reader on a receiver statically of that class (or a
+        bare reader call from inside the class); a read from any other class
+        (a subclass, a module method, a singleton method) is a use this pass
+        does not vet and kills the slot. */
   for (int id = 0; id < nt->count; id++) {
     read_slot[id] = -1;
     const char *ty = nt_type(nt, id);
-    if (!ty || !sp_streq(ty, "LocalVariableReadNode")) continue;
-    int sidx = c->nscope[id];
-    const char *nm = nt_str(nt, id, "name");
-    LocalVar *lv = nm ? scope_local(&c->scopes[sidx], nm) : NULL;
-    if (lv) read_slot[id] = oa_find(sl, n, sidx, lv);
+    if (!ty) continue;
+    if (sp_streq(ty, "LocalVariableReadNode")) {
+      int sidx = c->nscope[id];
+      const char *nm = nt_str(nt, id, "name");
+      LocalVar *lv = nm ? scope_local(&c->scopes[sidx], nm) : NULL;
+      if (lv) read_slot[id] = oa_find(sl, n, sidx, lv);
+      continue;
+    }
+    if (sp_streq(ty, "InstanceVariableReadNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      Scope *sc = comp_scope_of(c, id);
+      if (!nm || !sc) continue;
+      for (int i = 0; i < n; i++) {
+        if (sl[i].ici < 0 || !sp_streq(c->classes[sl[i].ici].ivars[sl[i].iiv], nm)) continue;
+        if (sc->class_id == sl[i].ici && !sc->is_cmethod) read_slot[id] = i;
+        else if (sc->class_id >= 0 && sc->class_id != sl[i].ici) {
+          int related = 0;
+          for (int k = sc->class_id; k >= 0; k = c->classes[k].parent) if (k == sl[i].ici) { related = 1; break; }
+          if (related) sl[i].alive = 0;
+        }
+        else sl[i].alive = 0;
+      }
+      continue;
+    }
+    if (sp_streq(ty, "CallNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver");
+      int args = nt_ref(nt, id, "arguments"); int an = 0;
+      if (args >= 0) nt_arr(nt, args, "arguments", &an);
+      if (!nm || an != 0 || nt_ref(nt, id, "block") >= 0) continue;
+      int rci = -1;
+      if (recv >= 0) { TyKind rt = infer_type(c, recv); if (ty_is_object(rt)) rci = ty_object_class(rt); }
+      else { Scope *sc = comp_scope_of(c, id); if (sc && !sc->is_cmethod) rci = sc->class_id; }
+      if (rci < 0) continue;
+      for (int i = 0; i < n; i++) {
+        if (sl[i].ici != rci) continue;
+        const char *ivn = c->classes[rci].ivars[sl[i].iiv];
+        if (!sp_streq(ivn + 1, nm)) continue;
+        /* the synthesized attr_reader only: an explicit `def x; @x; end` is a
+           method with a return slot, reached through call_ret in step 4 */
+        if (comp_is_reader(&c->classes[rci], nm) && comp_method_in_chain(c, rci, nm, NULL) < 0)
+          read_slot[id] = i;
+      }
+    }
   }
 
   /* 3. op-assign / multi-target write forms on a slot are unmodeled -> kill. */
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
+    if (sp_streq(ty, "InstanceVariableOperatorWriteNode") ||
+        sp_streq(ty, "InstanceVariableTargetNode") ||
+        sp_streq(ty, "InstanceVariableAndWriteNode") ||
+        sp_streq(ty, "InstanceVariableOrWriteNode")) {
+      const char *nm = nt_str(nt, id, "name");
+      for (int i = 0; nm && i < n; i++)
+        if (sl[i].ici >= 0 && sp_streq(c->classes[sl[i].ici].ivars[sl[i].iiv], nm)) sl[i].alive = 0;
+      continue;
+    }
     if (!sp_streq(ty, "LocalVariableOperatorWriteNode") &&
         !sp_streq(ty, "LocalVariableTargetNode") &&
         !sp_streq(ty, "LocalVariableAndWriteNode") &&
@@ -7361,6 +7509,12 @@ static int narrow_object_arrays(Compiler *c) {
              a return slot reachable that way must narrow. */
           for (int pi = 0; pi < n; pi++) {
             if (!sl[pi].alive) continue;
+            if (sl[pi].ici >= 0) {
+              /* a dynamic receiver may be this class: its reader would hand
+                 the unboxed array to a caller expecting the boxed one */
+              if (sp_streq(c->classes[sl[pi].ici].ivars[sl[pi].iiv] + 1, name)) sl[pi].alive = 0;
+              continue;
+            }
             Scope *PS = &c->scopes[sl[pi].sidx];
             if (!PS->name || !sp_streq(PS->name, name)) continue;
             if (!sl[pi].lv) { sl[pi].alive = 0; continue; }
@@ -7427,10 +7581,31 @@ static int narrow_object_arrays(Compiler *c) {
     oa_classify_value(c, sl, n, read_slot, call_ret, claimed, S, nt_ref(nt, id, "value"));
   }
 
+  /* 5a. InstanceVariableWriteNode sources, the same way; a write from a
+         method of another class (or a singleton method) is unvetted. */
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || !sp_streq(ty, "InstanceVariableWriteNode")) continue;
+    const char *nm = nt_str(nt, id, "name");
+    Scope *sc = comp_scope_of(c, id);
+    if (!nm || !sc) continue;
+    for (int i = 0; i < n; i++) {
+      if (sl[i].ici < 0 || !sp_streq(c->classes[sl[i].ici].ivars[sl[i].iiv], nm)) continue;
+      if (sc->class_id == sl[i].ici && !sc->is_cmethod)
+        oa_classify_value(c, sl, n, read_slot, call_ret, claimed, i, nt_ref(nt, id, "value"));
+      else if (sc->class_id < 0) sl[i].alive = 0;
+      else {
+        int related = 0;
+        for (int k = sc->class_id; k >= 0; k = c->classes[k].parent) if (k == sl[i].ici) { related = 1; break; }
+        if (related || sc->is_cmethod) sl[i].alive = 0;
+      }
+    }
+  }
+
   /* 5b. a return slot's own value: the method's tail expression and every
          explicit `return`, classified exactly like a local's write sources. */
   for (int i = 0; i < n; i++) {
-    if (sl[i].lv || !sl[i].alive) continue;
+    if (sl[i].lv || sl[i].ici >= 0 || !sl[i].alive) continue;
     Scope *M = &c->scopes[sl[i].sidx];
     int bn = 0; const int *bl = M->body >= 0 ? nt_arr(nt, M->body, "body", &bn) : NULL;
     if (!bl || bn == 0) { sl[i].alive = 0; continue; }
@@ -7452,19 +7627,39 @@ static int narrow_object_arrays(Compiler *c) {
          anywhere names it for `send`/`method`/`define_method`/`&:m`, and
          `super` reaches it with no call node at all. Retyping its C return
          under either would hand back something the caller cannot read. */
+  /* the `attr_reader :items` declaration itself names the reader with a
+     symbol; that one is the reader's definition, not a dynamic route to it */
+  char *attr_sym = (char *)calloc(nc, 1);
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || !sp_streq(ty, "CallNode") || nt_ref(nt, id, "receiver") >= 0) continue;
+    const char *cn = nt_str(nt, id, "name");
+    if (!cn || !(sp_streq(cn, "attr_reader") || sp_streq(cn, "attr"))) continue;
+    int aa = nt_ref(nt, id, "arguments"); int aan = 0;
+    const int *aav = aa >= 0 ? nt_arr(nt, aa, "arguments", &aan) : NULL;
+    for (int k = 0; k < aan; k++) if (aav[k] >= 0 && aav[k] < nc) attr_sym[aav[k]] = 1;
+  }
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
     const char *mn = NULL;
-    if (sp_streq(ty, "SymbolNode")) mn = nt_str(nt, id, "value");
+    if (sp_streq(ty, "SymbolNode")) { if (attr_sym[id]) continue; mn = nt_str(nt, id, "value"); }
     else if (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode")) {
       Scope *ssc = comp_scope_of(c, id);
       mn = ssc ? ssc->name : NULL;
     }
     if (!mn) continue;
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++) {
+      if (sl[i].ici >= 0) {
+        /* `send(:items)`, `instance_variable_get(:@items)`, `method(:items)`,
+           a re-declared accessor: any symbol naming the ivar or its reader */
+        const char *ivn = c->classes[sl[i].ici].ivars[sl[i].iiv];
+        if (sp_streq(ivn, mn) || sp_streq(ivn + 1, mn)) sl[i].alive = 0;
+        continue;
+      }
       if (!sl[i].lv && c->scopes[sl[i].sidx].name &&
           sp_streq(c->scopes[sl[i].sidx].name, mn)) sl[i].alive = 0;
+    }
   }
 
   /* 6. a slot read left unclaimed escaped into an unmodeled context -> kill.
@@ -7473,8 +7668,8 @@ static int narrow_object_arrays(Compiler *c) {
         return slot no call site reached at all is a method entered by some
         route this pass never saw, so its C signature must not move. */
   for (int id = 0; id < nt->count; id++)
-    if (call_ret[id] >= 0 && !claimed[id]) sl[call_ret[id]].alive = 0;
-  for (int i = 0; i < n; i++) if (!sl[i].lv && !sl[i].saw_call) sl[i].alive = 0;
+    if (call_ret[id] >= 0 && !claimed[id] && !value_ok[id]) sl[call_ret[id]].alive = 0;
+  for (int i = 0; i < n; i++) if (!sl[i].lv && sl[i].ici < 0 && !sl[i].saw_call) sl[i].alive = 0;
   for (int id = 0; id < nt->count; id++)
     if (read_slot[id] >= 0 && !claimed[id]) sl[read_slot[id]].alive = 0;
 
@@ -7494,6 +7689,7 @@ static int narrow_object_arrays(Compiler *c) {
        this pass reaches no decision, or the two passes alternate forever and
        the fixpoint burns its whole round budget (#3781). */
     if (!sl[r].alive || sl[r].cls == -1 || sl[r].cls == -2) {
+      if (sl[i].ici >= 0) continue;   /* an ivar with no decision stays the poly array it was reset to */
       if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
       else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
       continue;
@@ -7504,6 +7700,7 @@ static int narrow_object_arrays(Compiler *c) {
          last but not the boxed sort/min/max comparators yet, so a component
          that used those (needs_cmp) stays on the poly path for now. */
       if (sl[r].needs_cmp) {
+        if (sl[i].ici >= 0) continue;
         if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
         else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
         continue;
@@ -7515,13 +7712,19 @@ static int narrow_object_arrays(Compiler *c) {
          class can actually compare (has `<=>` in its chain); otherwise it stays
          poly, where the boxed comparator raises the CRuby ArgumentError. */
       if (sl[r].needs_cmp && comp_method_in_chain(c, sl[r].cls, "<=>", NULL) < 0) {
+        if (sl[i].ici >= 0) continue;
         if (sl[i].lv) sl[i].lv->oa_pin = sl[i].old_pin;
         else c->scopes[sl[i].sidx].ret_oa_pin = sl[i].old_pin;
         continue;
       }
       nty = ty_obj_array(sl[r].cls);
     }
-    if (sl[i].lv) {
+    if (sl[i].ici >= 0) {
+      ClassInfo *cl = &c->classes[sl[i].ici];
+      sp_ivwatch(cl->ivars[sl[i].iiv], "narrow_object_arrays", cl->ivar_types[sl[i].iiv], nty);
+      cl->ivar_types[sl[i].iiv] = nty; cl->ivar_oa_type[sl[i].iiv] = nty; cl->ivar_int_table[sl[i].iiv] = 1;
+    }
+    else if (sl[i].lv) {
       sl[i].lv->type = nty; sl[i].lv->oa_pin = nty;
     }
     else { c->scopes[sl[i].sidx].ret = nty; c->scopes[sl[i].sidx].ret_oa_pin = nty; }
@@ -7530,11 +7733,12 @@ static int narrow_object_arrays(Compiler *c) {
      the one it carried in -- the fixpoint's convergence test depends on this
      being false once the evidence settles. */
   for (int i = 0; i < n; i++) {
-    TyKind now = sl[i].lv ? sl[i].lv->oa_pin : c->scopes[sl[i].sidx].ret_oa_pin;
+    TyKind now = sl[i].ici >= 0 ? c->classes[sl[i].ici].ivar_oa_type[sl[i].iiv]
+               : sl[i].lv ? sl[i].lv->oa_pin : c->scopes[sl[i].sidx].ret_oa_pin;
     if (now != sl[i].old_pin) { changed = 1; break; }
   }
 
-  free(sl); free(read_slot); free(call_ret); free(claimed); free(value_ok);
+  free(sl); free(read_slot); free(call_ret); free(claimed); free(value_ok); free(attr_sym);
   return changed;
 }
 
@@ -14455,6 +14659,21 @@ void analyze_program(Compiler *c) {
   narrow_int_table_ivars(c);
   narrow_object_arrays(c);
   narrow_locals_from_arrays(c);
+  /* An --rbs `Array[Class]` ivar seed the pass could not honour is said so,
+     rather than dropped without a word (#4444): the array is used in a way
+     its unboxed form has no emitter for, or read from outside the class's
+     own instance methods. */
+  for (int ci = 0; ci < c->nclasses; ci++) {
+    ClassInfo *cl = &c->classes[ci];
+    for (int iv = 0; iv < cl->nivars; iv++) {
+      if (!cl->ivar_oa_seed[iv] || ty_is_obj_array(cl->ivar_types[iv])) continue;
+      int want = cl->ivar_oa_seed[iv] - 1;
+      fprintf(stderr, "warning: --rbs: %s %s: Array[%s] stays a boxed array; every use of it must be "
+                      "one the unboxed array supports ([], []=, push, length, empty?, first, last, "
+                      "min, max, sort) from the class's own instance methods or its attr_reader\n",
+              cl->name, cl->ivars[iv], want >= 0 && want < c->nclasses ? c->classes[want].name : "?");
+    }
+  }
 
   /* narrow poly locals that are only ever used as ints (drop per-use boxing);
      the rebuild below re-infers their reads/ops at the narrowed int type. */

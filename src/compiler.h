@@ -253,6 +253,17 @@ typedef struct {
   unsigned char *ivar_nullable_int_elem; /* the same one level in: an int/float
                                      ARRAY slot some element of which can be
                                      the sentinel */
+  TyKind *ivar_oa_type;  /* the homogeneous pointer-array type narrow_object_arrays
+                            gave the slot (a table of int arrays or an array of one
+                            user class), TY_UNKNOWN when it made no decision. Set
+                            together with ivar_int_table, which is the pin every
+                            re-derivation site honours; this is the type the
+                            per-round re-assert restores (#4444). */
+  unsigned char *ivar_oa_seed;  /* an --rbs `Array[Class]` seed asked for the
+                                   pointer array (1 + the class index). It is
+                                   not a pin: the narrowing pass decides from
+                                   the uses, and a request it could not honour
+                                   is reported after the fixpoint (#4444). */
   unsigned char *ivar_int_table;  /* the slot is a table of int arrays, narrowed
                                      to TY_INT_ARRAY_ARRAY while the fixpoint
                                      runs so a parameter bound from `@t[k][j]`
