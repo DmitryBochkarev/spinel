@@ -384,14 +384,48 @@ int main(int argc, char **argv) {
     else if (sp_streq(a, "--version")) {
       char ccv[512] = {0};
       char ccq[1024];
-      snprintf(ccq, sizeof ccq, "%s --version 2>/dev/null", cc_cmd);
+      /* Ask the preprocessor what the compiler is rather than `--version`,
+         whose first word is the name it was invoked by: `cc --version` says
+         "cc (Ubuntu ...) 13.3.0" for gcc, which names the symlink, not the
+         compiler. __clang_version__ / __GNUC__ say which family and which
+         version; the invocation name is added only when it differs. */
+      snprintf(ccq, sizeof ccq, "%s -E -dM -x c /dev/null 2>/dev/null", cc_cmd);
       FILE *fp = popen(ccq, "r");
       if (fp) {
-        if (fgets(ccv, sizeof ccv, fp)) {
-          char *nl = strchr(ccv, '\n');
-          if (nl) *nl = '\0';
+        char line[512], clangv[128] = {0};
+        int gmaj = -1, gmin = 0, gpat = 0, apple = 0;
+        while (fgets(line, sizeof line, fp)) {
+          static const char cvk[] = "#define __clang_version__ \"";
+          if (!strncmp(line, cvk, sizeof cvk - 1)) {
+            char *q = strchr(line + sizeof cvk - 1, '"'); if (q) *q = '\0';
+            snprintf(clangv, sizeof clangv, "%s", line + sizeof cvk - 1);
+            char *sp = strchr(clangv, ' '); if (sp) *sp = '\0';   /* "18.1.3 (1ubuntu1)" -> "18.1.3" */
+          }
+          else if (!strncmp(line, "#define __apple_build_version__ ", 32)) apple = 1;
+          else if (!strncmp(line, "#define __GNUC__ ", 17)) gmaj = atoi(line + 17);
+          else if (!strncmp(line, "#define __GNUC_MINOR__ ", 23)) gmin = atoi(line + 23);
+          else if (!strncmp(line, "#define __GNUC_PATCHLEVEL__ ", 28)) gpat = atoi(line + 28);
         }
         pclose(fp);
+        const char *family = clangv[0] ? "clang" : gmaj >= 0 ? "gcc" : NULL;
+        if (family) {
+          const char *base = strrchr(cc_cmd, '/'); base = base ? base + 1 : cc_cmd;
+          int named = !strncmp(base, family, strlen(family));
+          /* Apple's clang numbers itself differently from LLVM's; say which */
+          if (clangv[0]) snprintf(ccv, sizeof ccv, "%s%s %s%s%s%s", apple ? "apple " : "", family, clangv, named ? "" : " (", named ? "" : base, named ? "" : ")");
+          else snprintf(ccv, sizeof ccv, "%s %d.%d.%d%s%s%s", family, gmaj, gmin, gpat, named ? "" : " (", named ? "" : base, named ? "" : ")");
+        }
+      }
+      if (!ccv[0]) {   /* a compiler the preprocessor probe cannot read: its own first line */
+        snprintf(ccq, sizeof ccq, "%s --version 2>/dev/null", cc_cmd);
+        fp = popen(ccq, "r");
+        if (fp) {
+          if (fgets(ccv, sizeof ccv, fp)) {
+            char *nl = strchr(ccv, '\n');
+            if (nl) *nl = '\0';
+          }
+          pclose(fp);
+        }
       }
       /* The release name first, since it is what a person reads; the build
          revision in parentheses is what tells two builds of one release

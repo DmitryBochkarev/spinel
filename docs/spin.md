@@ -154,10 +154,14 @@ entries. Set `SPIN_INDEX` to use another index (a `file://` URL works).
 revision in parentheses, then the C compiler:
 
 ```
-spinel 2026.09.12 (112bae85) [cc (Ubuntu 13.3.0) 13.3.0]
-spinel 2026.09.12+7 (94b68d85) [cc ...]     # seven commits past that release
-spinel unreleased (6b8ddcd8) [cc ...]       # before the first release
+spinel 2026.09.12 (112bae85) [gcc 13.3.0]
+spinel 2026.09.12+7 (94b68d85) [gcc 13.3.0 (cc)]   # seven commits past that release
+spinel unreleased (6b8ddcd8) [clang 18.1.3]        # before the first release
 ```
+
+The compiler is named by what it is (its predefined macros), not by the name
+it was invoked under; that name is added in parentheses when it differs, as
+`cc` does above.
 
 Releases are dated: `YYYY.MM.DD`, with `.N` appended for a second release on
 the same day. The fields are fixed width because the calendar fixes them, so
