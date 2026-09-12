@@ -34,3 +34,20 @@ adapter_arity: -1
 6
 6
 splat_over: NoMethodError
+toproc_splat_over: NoMethodError
+6
+ptr_arg: NoMethodError
+ptr_splat: NoMethodError
+rest_splat_static: NoMethodError
+static_splat_short: ArgumentError
+static_splat_long: ArgumentError
+static_call_over: ArgumentError
+static_toproc_over: ArgumentError
+[1, 6]
+[1, 6]
+adapter_set_short: ArgumentError
+adapter_set_splat: ArgumentError
+adapter_set_empty: ArgumentError
+sadapter_set_short: ArgumentError
+rest_opt_short: NoMethodError
+10

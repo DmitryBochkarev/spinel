@@ -14990,6 +14990,28 @@ static void emit_kconv_call(Compiler *c, int id, const int *av, int ac, int rais
   buf_printf(b, ", %d); })", raise);
 }
 
+/* Bind a bound-Method call site's already-evaluated argument to a named local
+   and register it as the callee parameter's rename, so a LATER parameter
+   default that reads this parameter (`def m(a, b = a + 5)`) resolves at the
+   call site instead of emitting the callee's `lv_a`, which does not exist
+   there -- a C compile failure, or a same-named caller local read by mistake.
+   The direct-call arm does the same with its own `_pd` locals (#4431); this is
+   the bound-Method `.call` path's copy. `k` is the parameter's call position
+   (the local name suffix), `pidx` its index in the callee scope. No-op unless
+   `pd_mode` and the callee has a default reading an earlier parameter. */
+static void emit_bm_param_alias(Compiler *c, Scope *tm, int k, int pidx, int atmp,
+                                int pd_mode, int pd_uid, Buf *b) {
+  if (!pd_mode || !tm || pidx >= tm->nparams || !tm->pnames || !tm->pnames[pidx]) return;
+  if (g_nren >= MAX_RENAME) return;
+  LocalVar *pp = scope_local(tm, tm->pnames[pidx]);
+  buf_puts(b, "; ");
+  emit_ctype(c, pp ? pp->type : TY_INT, b);
+  buf_printf(b, " lv__pd%d_%d = _t%d; ", pd_uid, k, atmp);
+  snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", tm->pnames[pidx]);
+  snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_pd%d_%d", pd_uid, k);
+  g_nren++;
+}
+
 static void emit_call_body(Compiler *c, int id, Buf *b) {
   /* deep-return pickup (#3227 P6): a marked receiverless call to a method
      whose every return path yields a shared handle -- reset the side
@@ -17335,7 +17357,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         else if (sp_streq(sym, "push")) bop = "push";
       }
       if (bop) {
-        mi_legacy = 1;
+        /* Under promote the adapter is emitted poly-signatured (sp_RbVal
+           self/arg/return), so it must NOT claim the legacy sp_int ABI: the
+           non-splat poly call path is already selected by mabi_poly and never
+           consults this flag, while the spread path's generic trampoline
+           would cast the poly-signatured adapter through the legacy ABI and
+           crash. Declining leaves that trampoline to raise instead. */
+        mi_legacy = g_promote_mode ? 0 : 1;
         bop_is_adapter = 1;
         bop_argc = (bop[0] == 's') ? 2 : 1;  /* set=2, get/push=1 */
         /* memoized per (kind, op): emit the adapter once */
@@ -18103,26 +18131,38 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     /* A typed-array adapter (`<array>.method(:op)`) has no target scope; its
        Ruby return is op-dependent. Read it from the same shared helper the
        bind site stamps SP_BM_RET_* from, so the call site casts the raw
-       register to the array/String it really is instead of an Integer. */
-    if (!tm && !g_promote_mode) {
+       register to the array/String it really is instead of an Integer. The
+       adapter's fixed arg count is needed too: a trailing splat expands
+       against it below, instead of being passed as one sp_int argument (which
+       emitted a `sp_int = sp_PolyArray *` initializer and did not compile). */
+    int adapter_argc = -1;
+    TyKind adapter_ty = TY_UNKNOWN;   /* the adapter's receiver array kind */
+    int adapter_push = 0;             /* `<array>.method(:push)`, variadic */
+    if (!tm) {
       int arecv = mn >= 0 ? nt_ref(nt, mn, "receiver") : -1;
       const char *asym = mn >= 0 ? method_sym_arg(c, mn) : NULL;
       TyKind at = (arecv >= 0 && asym)
                     ? method_obj_adapter_ret(comp_ntype(c, arecv), asym) : TY_UNKNOWN;
-      if (at != TY_UNKNOWN) tret = at;
+      if (at != TY_UNKNOWN) {
+        adapter_ty = comp_ntype(c, arecv);
+        if (!g_promote_mode) tret = at;
+        adapter_argc = sp_streq(asym, "[]=") ? 2 : 1;
+        adapter_push = sp_streq(asym, "push");
+      }
     }
     if (!is_scalar_ret(tret)) tret = TY_INT;  /* aggregate ret: raw carrier */
     /* A trailing splat with a statically-known target expands into the
        remaining declared params from the splatted array (#3248); the
        effective arg count becomes the target's residual arity. */
     int splat_at2 = -1;
+    int any_splat_arg = 0;
     for (int k = 0; k < argc; k++) {
       const char *aty3 = nt_type(nt, argv[k]);
-      if (aty3 && sp_streq(aty3, "SplatNode")) { splat_at2 = k; break; }
+      if (aty3 && sp_streq(aty3, "SplatNode")) { splat_at2 = k; any_splat_arg = 1; break; }
     }
     int eargc = argc, tsplat = 0;
-    if (splat_at2 >= 0 && splat_at2 == argc - 1 && tm) {
-      eargc = tm->nparams - shift;
+    if (splat_at2 >= 0 && splat_at2 == argc - 1 && (tm || adapter_argc >= 0)) {
+      eargc = tm ? (tm->nparams - shift) : adapter_argc;
       if (eargc < splat_at2) eargc = splat_at2;
     }
     else splat_at2 = -1;   /* mid-list splat / unknown target: old path */
@@ -18162,11 +18202,158 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       else { free(psrc); psrc = NULL; }
     }
     buf_printf(b, "({ sp_BoundMethod *_t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+    /* A rest parameter with a trailing runtime splat that is not exactly the
+       rest argument itself cannot ride the fixed sp_int cast: the splat's
+       surplus would land in the trailing sp_PolyArray* slot as an sp_int and
+       the callee prologue would root it (a SIGSEGV). The poly-slot route
+       declines such a target (sp_bm_sig_scalar_only); decline here too. The
+       same cast is wrong when the call omits optionals before the rest
+       (`def m(a, b = 2, *r)` called with one argument): the fixed expansion
+       fills only the supplied slots, so the omitted parameters' registers and
+       the rest pointer are never passed at all. */
+    if (tm && tm->rest_idx >= 0 &&
+        ((splat_at2 >= 0 && !(splat_at2 == tm->rest_idx - shift && splat_at2 == eargc - 1)) ||
+         (splat_at2 < 0 && eargc < tm->rest_idx - shift))) {
+      buf_printf(b, "sp_raise_cls(\"NoMethodError\", \"undefined method 'call' for an instance of Method\"); %s; })",
+                 default_value(tret));
+      free(psrc);
+      return;
+    }
+    /* A parameter default that reads an earlier parameter is evaluated at the
+       CALL site by emit_arg_or_default; alias each bound parameter to a
+       `lv__pd` local and register the rename so those reads resolve (see
+       emit_bm_param_alias). */
+    int pd_mode = 0, pd_uid = 0, pd_base = g_nren;
+    if (tm && default_refs_earlier_param(c, tm)) { pd_mode = 1; pd_uid = ++g_tmp; }
+    /* A typed-array `push` adapter is variadic in CRuby, but the synthesized
+       adapter pushes exactly ONE value. The generic single-cast call below
+       would silently drop every value after the first (`m.call(*[3, 4])`
+       answered `m.call(3)`), so invoke it once per value, materializing the
+       full (fixed + splatted) argument list for a runtime count. */
+    if (adapter_push && (any_splat_arg || argc != 1)) {
+      if (any_splat_arg) {
+        int tflat = ++g_tmp;
+        buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", tflat, tflat);
+        for (int k = 0; k < argc; k++) {
+          const char *aty3 = nt_type(nt, argv[k]);
+          if (aty3 && sp_streq(aty3, "SplatNode")) {
+            int sx = nt_ref(nt, argv[k], "expression");
+            Buf ab; memset(&ab, 0, sizeof ab);
+            if (sx >= 0) emit_boxed(c, sx, &ab);
+            int ts = ++g_tmp;
+            buf_printf(b, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
+                          " for (sp_int _i = 0; _i < _t%d->len; _i++)"
+                          " sp_PolyArray_push(_t%d, _t%d->data[_i]); } ",
+                       ts, ab.p ? ab.p : "sp_box_nil()", ts, ts, tflat, ts);
+            free(ab.p);
+          }
+          else {
+            Buf ab; memset(&ab, 0, sizeof ab);
+            emit_boxed(c, argv[k], &ab);
+            buf_printf(b, "sp_PolyArray_push(_t%d, %s); ", tflat, ab.p ? ab.p : "sp_box_nil()");
+            free(ab.p);
+          }
+        }
+        int ti = ++g_tmp;
+        buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) { sp_RbVal _e = _t%d->data[_t%d]; ",
+                   ti, ti, tflat, ti, tflat, ti);
+        if (poly_abi)
+          buf_printf(b, "((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)_t%d->fn)((void *)_t%d->self, _e); ", tr, tr);
+        else
+          buf_printf(b, "((sp_int (*)(void *, sp_int))(uintptr_t)_t%d->fn)((void *)_t%d->self,"
+                        " (_e.tag == SP_TAG_OBJ || _e.tag == SP_TAG_STR) ? (sp_int)(uintptr_t)_e.v.p : sp_poly_to_i(_e)); ",
+                     tr, tr);
+        buf_puts(b, "} ");
+      }
+      else {
+        for (int k = 0; k < argc; k++) {
+          int tv = ++g_tmp;
+          TyKind atv = comp_ntype(c, argv[k]);
+          if (poly_abi) { buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[k], b); }
+          else if (proc_slot_is_ptr(atv) || atv == TY_PROC) {
+            buf_printf(b, "sp_int _t%d = (sp_int)(uintptr_t)(", tv); emit_expr(c, argv[k], b); buf_puts(b, ")");
+          }
+          else { buf_printf(b, "sp_int _t%d = ", tv); emit_expr(c, argv[k], b); }
+          buf_puts(b, "; ");
+          if (poly_abi)
+            buf_printf(b, "((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)_t%d->fn)((void *)_t%d->self, _t%d); ", tr, tr, tv);
+          else
+            buf_printf(b, "((sp_int (*)(void *, sp_int))(uintptr_t)_t%d->fn)((void *)_t%d->self, _t%d); ", tr, tr, tv);
+        }
+      }
+      /* push answers the receiver array itself. An adapter call has no
+         target scope, so the analyzer types `.call` poly and the caller may
+         dispatch on the result; box it here like the generic Method-call
+         ABI's sp_bm_box_ret arm. */
+      {
+        char expr[32]; snprintf(expr, sizeof expr, "_t%d->self", tr);
+        emit_boxed_text(c, adapter_ty, expr, b);
+      }
+      buf_puts(b, "; })");
+      free(psrc);
+      return;
+    }
     if (splat_at2 >= 0) {
       tsplat = ++g_tmp;
       buf_printf(b, "sp_PolyArray *_t%d = ", tsplat);
       emit_expr(c, argv[splat_at2], b);
       buf_printf(b, "; SP_GC_ROOT(_t%d); ", tsplat);
+    }
+    /* A trailing runtime splat into a fixed-arity target must supply the
+       right count: the per-position expansion below reads exactly the fixed
+       slots, so a short splat silently filled the missing required slots with
+       0/nil and a long one silently dropped the surplus (CRuby raises
+       ArgumentError for both). Check the run-time length against the
+       target's required and total fixed count. The check mirrors
+       method_call_count_violation's shape: only a plain positional signature
+       has a meaningful count. */
+    if (tsplat && splat_at2 >= 0 && tm && tm->rest_idx < 0) {
+      int simple9 = tm->kwrest_idx < 0 && tm->npost_rest == 0 && !tm->cs_synth && !bam_wrapper(tm);
+      int nreq9 = 0, nfix9 = 0;
+      for (int i = shift; i < tm->nparams && simple9; i++) {
+        if (!tm->pnames[i] || (tm->pnames[i][0] == '_' && tm->pnames[i][1] == '_') ||
+            callee_has_kwarg(c, tm, tm->pnames[i])) { simple9 = 0; break; }
+        nfix9++;
+        if (!tm->pdefault || tm->pdefault[i] < 0) nreq9++;
+      }
+      if (simple9) {
+        int lo9 = nreq9 - splat_at2; if (lo9 < 0) lo9 = 0;
+        int hi9 = nfix9 - splat_at2; if (hi9 < 0) hi9 = 0;
+        char exp9b[32];
+        if (nreq9 == nfix9) snprintf(exp9b, sizeof exp9b, "%d", nfix9);
+        else snprintf(exp9b, sizeof exp9b, "%d..%d", nreq9, nfix9);
+        buf_printf(b, "if (_t%d->len < %d || _t%d->len > %d)"
+                      " sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                      "\"wrong number of arguments (given %%lld, expected %s)\","
+                      " (long long)(_t%d->len + %d))); ",
+                   tsplat, lo9, tsplat, hi9, exp9b, tsplat, splat_at2);
+      }
+    }
+    /* A typed-array adapter's synthesized C function has a fixed parameter
+       count (one for `[]`, two for `[]=`), but the call's C cast is built
+       from the supplied count: too few arguments leave its later parameters
+       reading an undefined register, so `ia.method(:[]=).call(0)` and
+       `.call(*[0])` mutated the array with a garbage element instead of
+       raising. CRuby raises ArgumentError; check the count before the cast.
+       `push` is variadic and handled above. */
+    if (!tm && adapter_argc >= 0 && !adapter_push) {
+      if (splat_at2 < 0) {
+        if (argc < adapter_argc) {
+          buf_printf(b, "sp_raise_cls(\"ArgumentError\", "
+                        "\"wrong number of arguments (given %d, expected %d..%d)\"); %s; })",
+                     argc, adapter_argc, adapter_argc + 1, default_value(tret));
+          free(psrc);
+          return;
+        }
+      }
+      else {
+        buf_printf(b, "if (_t%d->len + %d < %d)"
+                      " sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                      "\"wrong number of arguments (given %%lld, expected %d..%d)\","
+                      " (long long)(_t%d->len + %d))); ",
+                   tsplat, splat_at2, adapter_argc,
+                   adapter_argc, adapter_argc + 1, tsplat, splat_at2);
+      }
     }
     /* A target with a rest parameter takes ONE array there, not one C argument
        per call-site argument: bound positionally, the first argument went into
@@ -18182,6 +18369,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         LocalVar *pp = (tm && k + shift < tm->nparams) ? scope_local(tm, tm->pnames[k + shift]) : NULL;
         emit_ctype(c, pp ? pp->type : TY_INT, b);
         buf_printf(b, " _t%d = ", atmp[k]); emit_arg_or_default(c, tm, k + shift, argv[k], b);
+        emit_bm_param_alias(c, tm, k, k + shift, atmp[k], pd_mode, pd_uid, b);
         buf_puts(b, "; ");
       }
       atmp[splat_at2] = tsplat;
@@ -18204,6 +18392,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         LocalVar *pp = (tm && k + shift < tm->nparams) ? scope_local(tm, tm->pnames[k + shift]) : NULL;
         emit_ctype(c, pp ? pp->type : TY_INT, b);
         buf_printf(b, " _t%d = ", atmp2[k]); emit_arg_or_default(c, tm, k + shift, argv[k], b);
+        emit_bm_param_alias(c, tm, k, k + shift, atmp2[k], pd_mode, pd_uid, b);
         buf_puts(b, "; ");
       }
       atmp2[rest_at] = trest;
@@ -18216,23 +18405,51 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        reference it without re-evaluating (#3252). */
     for (int k = 0; k < eargc; k++) {
       atmp[k] = ++g_tmp;
-      if (splat_at2 >= 0 && k >= splat_at2) {
-        /* an expanded splat element, coerced to the declared param type */
+      if (splat_at2 >= 0 && k >= splat_at2 && !tm) {
+        /* A typed-array adapter's every fixed slot rides the sp_int register
+           (an StrArray element is laundered as its pointer), and a runtime
+           splat has no per-position type here, so launder each element the
+           same way sp_poly_callable_spread/sp_proc_call_spread do. Under
+           promote the adapter is poly-signatured and takes the boxed element. */
+        char el[64];
+        snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, %d)", tsplat, k - splat_at2);
+        if (poly_abi) buf_printf(b, "sp_RbVal _t%d = %s; ", atmp[k], el);
+        else buf_printf(b, "sp_int _t%d = ({ sp_RbVal _e = %s;"
+                           " (_e.tag == SP_TAG_OBJ || _e.tag == SP_TAG_STR)"
+                           " ? (sp_int)(uintptr_t)_e.v.p : sp_poly_to_i(_e); }); ",
+                        atmp[k], el);
+      }
+      else if (splat_at2 >= 0 && k >= splat_at2) {
+        /* an expanded splat element, coerced to the declared param type.
+           When the splat is shorter than the declared optional position, use
+           the parameter's default (the runtime count guard permits a short
+           splat only down to the required count) instead of reading past the
+           array. The default may be a literal or an expression reading an
+           earlier parameter, made resolvable by the alias registered below. */
         LocalVar *pp = (tm && k + shift < tm->nparams && tm->pnames)
                          ? scope_local(tm, tm->pnames[k + shift]) : NULL;
         TyKind pt3 = pp ? pp->type : TY_INT;
         char el[64];
         snprintf(el, sizeof el, "sp_PolyArray_get(_t%d, %d)", tsplat, k - splat_at2);
+        int optdef = (tm && tm->pdefault && k + shift < tm->nparams &&
+                      tm->pdefault[k + shift] >= 0) ? 1 : 0;
         emit_ctype(c, pt3, b);
         buf_printf(b, " _t%d = ", atmp[k]);
+        if (optdef) buf_printf(b, "(%d < _t%d->len) ? ", k - splat_at2, tsplat);
         if (pt3 == TY_POLY) buf_puts(b, el);
         else emit_unbox_text(c, pt3, el, b);
+        if (optdef) {
+          buf_puts(b, " : ");
+          emit_arg_or_default(c, tm, k + shift, -1, b);
+        }
+        emit_bm_param_alias(c, tm, k, k + shift, atmp[k], pd_mode, pd_uid, b);
       }
       else if (tm && k + shift < tm->nparams) {
         LocalVar *pp = scope_local(tm, tm->pnames[k + shift]);
         emit_ctype(c, pp ? pp->type : TY_INT, b);
         buf_printf(b, " _t%d = ", atmp[k]);
         emit_arg_or_default(c, tm, k + shift, psrc ? psrc[k] : argv[k], b);
+        emit_bm_param_alias(c, tm, k, k + shift, atmp[k], pd_mode, pd_uid, b);
       }
       else if (poly_abi) { buf_printf(b, "sp_RbVal _t%d = ", atmp[k]); emit_boxed(c, argv[k], b); }
       else if (proc_slot_is_ptr(comp_ntype(c, argv[k]))) {
@@ -18292,6 +18509,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     if (pass == 1) buf_puts(b, ")");
     }
     buf_puts(b, "; })");
+    g_nren = pd_base;
     free(atmp);
     free(psrc);
     return;

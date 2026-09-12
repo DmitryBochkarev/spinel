@@ -185,6 +185,30 @@ static inline sp_int sp_bm_norm_ret(sp_BoundMethod *m, sp_int raw) {
    so a later dynamic .call/[] through a container sees m->unbound and raises
    instead of invoking the instance C function with no self (#4395). */
 static inline sp_BoundMethod *sp_bm_set_unbound(sp_BoundMethod *m) { if (m) m->unbound = 1; return m; }
+/* The scalar-kind ABI token of a boxed argument (see abi_sig_token in
+   codegen_call.c: TY_INT/TY_BOOL/TY_SYMBOL/TY_NIL are 1/2/3/4), or 0 when the
+   value has no scalar sp_int slot at all (a pointer, Float, or Bigint). The
+   generic Method trampoline and the poly spread path read the same encoding as
+   the statically-typed sp_bm_legacy_abi_ok. */
+static inline sp_int sp_bm_boxed_scalar_token(sp_RbVal e) {
+  switch (e.tag) {
+    case SP_TAG_INT:  return 1;   /* TY_INT */
+    case SP_TAG_BOOL: return 2;   /* TY_BOOL */
+    case SP_TAG_SYM:  return 3;   /* TY_SYMBOL */
+    case SP_TAG_NIL:  return 4;   /* TY_NIL */
+    default:          return 0;   /* pointer/Float/Bigint: no scalar slot */
+  }
+}
+/* Whether a boxed argument with scalar token `code` fits the signature's slot
+   at position `i`, under the same rule as sp_bm_sig_pos_match: an exact
+   scalar-kind match, or the TY_UNKNOWN 0 wildcard on the parameter side. A
+   code of 0 (a value with no scalar slot) never fits. */
+static inline sp_bool sp_bm_sig_pos_scalar_ok(sp_int code, const char *sig, sp_int i) {
+  if (!sig || code == 0) return FALSE;
+  sp_int want = 0;
+  for (int k = 0; k < 8; k++) want = want * 10 + (sig[8 * i + k] - '0');
+  return want == code || want == 0;
+}
 /* Whether a call passing `argc` arguments whose per-position ABI type tokens
    (eight chars each; see abi_sig_token in codegen_call.c) are `arg_sig` can
    ride the target's legacy sp_int ABI.

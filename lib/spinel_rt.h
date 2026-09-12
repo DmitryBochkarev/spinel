@@ -11702,15 +11702,26 @@ static sp_RbVal sp_env_filter_bang_opt(sp_Proc *p, int keep) {
 static void sp_proc_call_spread(sp_Proc *p, sp_RbVal arr) { SP_GC_ROOT(p);
   if (!p || !p->fn) return;
   sp_int n = sp_poly_length(arr);
-  if (n > 16) n = 16;
+  sp_int fill = n > 16 ? 16 : n;
   sp_int slots[16];
-  for (sp_int i = 0; i < n; i++) {
+  for (sp_int i = 0; i < fill; i++) {
     sp_RbVal e = sp_poly_arr_get(arr, i);
     _sp_proc_poly_args[i] = e;
     slots[i] = (e.tag == SP_TAG_OBJ || e.tag == SP_TAG_STR)
              ? (sp_int)(uintptr_t)e.v.p : sp_poly_to_i(e);
   }
-  sp_proc_call(p, n, slots);
+  /* The generic bound-Method trampoline raises its own NoMethodError for
+     argc > 16 -- the legacy sp_int ABI packs at most 16 slots. Hand it the
+     TRUE count so that guard fires: clamping first made
+     `[Wide.new.method(:m16)][0].to_proc.call(*a20)` answer 1+16 where the
+     plan (and CRuby) decline. The per-site `_mtp_N` bound-Method trampoline
+     checks its own argument count the same way, so it sees the true count
+     too. Both are created with sp_bm_cap_scan and lambda_p; every other proc
+     body reads the boxed channel with a `< 16` bound (its prologue indexes
+     `_sp_proc_poly_args[argc-1]`), so it keeps the clamp. A Hash default proc
+     shares the scan hook but is not a lambda. */
+  sp_int pass = (p->cap_scan == sp_bm_cap_scan && p->lambda_p) ? n : fill;
+  sp_proc_call(p, pass, slots);
 }
 /* Enumerator#size (CRuby's ary2sv-independent size protocol): a materialized
    enumerator reports its snapshot length; a generator reports its stored size --
@@ -11914,6 +11925,11 @@ static sp_RbVal sp_poly_callable_spread(sp_RbVal v, sp_RbVal arr) {
     sp_int slots[16];
     for (sp_int i = 0; i < n; i++) {
       sp_RbVal e = sp_poly_arr_get(arr, i);
+      /* The trampoline rejects an argument whose scalar kind does not match
+         the Method's stamped slot (or a pointer/float/bigint, which has no
+         sp_int slot at all) after reading it back from the published boxed
+         side-channel below, the same way a statically-typed .call declines via
+         sp_bm_legacy_abi_ok. */
       _sp_proc_poly_args[i] = e;
       slots[i] = (e.tag == SP_TAG_OBJ || e.tag == SP_TAG_STR)
                ? (sp_int)(uintptr_t)e.v.p : sp_poly_to_i(e);

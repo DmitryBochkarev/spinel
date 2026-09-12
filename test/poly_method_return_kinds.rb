@@ -86,6 +86,44 @@ pslot = [sa.method(:push)]
 puts pslot[0].call("w").inspect
 puts pslot[0].arity.inspect
 
+# static adapter `.call` with a runtime splat: the argument count is dynamic,
+# so the adapter expands it against its fixed arity and launders each element
+# (previously the splat was passed as one sp_int argument, which emitted an
+# `sp_int = sp_PolyArray *` initializer and did not compile)
+ia2 = [1, 2]
+ia2_args = [3]
+puts ia2.method(:push).call(*ia2_args).inspect
+puts ia2.inspect
+ia2_set = [0, 7]
+puts ia2.method(:[]=).call(*ia2_set).inspect
+puts ia2.inspect
+sa2 = ["x"]
+sa2_args = ["y"]
+puts sa2.method(:push).call(*sa2_args).inspect
+puts sa2.inspect
+sa2_set = [0, "z"]
+puts sa2.method(:[]=).call(*sa2_set).inspect
+puts sa2.inspect
+puts sa2.method(:[]).call(*[0]).inspect
+
+# `Array#push` is variadic: the fixed-arity adapter must be invoked once per
+# value (a single call silently dropped every value after the first)
+ia3 = [1, 2]
+puts ia3.method(:push).call(3, 4).inspect
+puts ia3.inspect
+ia4 = [1, 2]
+puts ia4.method(:push).call(*[3, 4]).inspect
+puts ia4.inspect
+ia5 = [1, 2]
+puts ia5.method(:push).call(*[3], 5).inspect
+puts ia5.inspect
+sa3 = ["x"]
+puts sa3.method(:push).call("y", "z").inspect
+puts sa3.inspect
+sa4 = ["x"]
+puts sa4.method(:push).call(*["y", "z"]).inspect
+puts sa4.inspect
+
 # splat on a bound Method in a poly slot: the argument count is only known at
 # run time, so the spread dispatches on the value's class (a Method through
 # the generic trampoline, not cast to an sp_Proc)
@@ -97,3 +135,24 @@ puts tslot[0].call(*argsv)
 puts tslot[1].call(*argsv)
 puts tslot[0][*argsv]
 puts tslot[1].to_proc.call(*argsv)
+
+# A trailing runtime splat into a statically-bound fixed-arity Method now
+# validates the run-time count (CRuby's ArgumentError) and fills a literal
+# optional default for a short splat instead of reading past the array.
+class OptSplat
+  def two(a, b) = a + b
+  def opt(a, b = 10) = a + b
+end
+op = OptSplat.new
+puts op.method(:opt).call(*[1])
+puts op.method(:opt).call(*[1, 2])
+begin
+  op.method(:two).call(*[1])
+rescue => e
+  puts "short: #{e.class}"
+end
+begin
+  op.method(:two).call(*[1, 2, 3])
+rescue => e
+  puts "long: #{e.class}"
+end

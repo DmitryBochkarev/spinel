@@ -29,6 +29,15 @@ rescue NoMethodError
   puts "#{label}: NoMethodError"
 end
 
+# The count guards raise CRuby's ArgumentError (both engines); record the
+# class so a silently-dropped or zero-filled argument shows up as ": no raise".
+def expect_raise(label)
+  yield
+  puts "#{label}: no raise"
+rescue => e
+  puts "#{label}: #{e.class}"
+end
+
 class Base
   def mixed(i, s) = i + s.length
   def str_method(s) = s.length
@@ -158,3 +167,61 @@ class Wide
 end
 wide_args = (1..20).to_a
 expect_nome("splat_over") { [Wide.new.method(:m16)][0].call(*wide_args) }
+# ... and the same through the Method#to_proc wrapper: the generic trampoline
+# must see the overlong count, not a clamped 16, or it silently truncates.
+expect_nome("toproc_splat_over") { [Wide.new.method(:m16)][0].to_proc.call(*wide_args) }
+
+# A pointer argument to a scalar (int-inferred) parameter declines on both the
+# static and the spread path: the generic Method trampoline has only the raw
+# sp_int slots and would otherwise read the String pointer as an Integer.
+class ScalarArg
+  def add1(x) = x + 1
+end
+puts ScalarArg.new.add1(5)
+expect_nome("ptr_arg")   { [ScalarArg.new.method(:add1)][0].call("s") }
+ptr_args = ["s"]
+expect_nome("ptr_splat") { [ScalarArg.new.method(:add1)][0].call(*ptr_args) }
+
+# A rest parameter reached by a trailing runtime splat declines on the static
+# bound-Method path too: the splat's surplus would land in the trailing
+# sp_PolyArray* slot as an sp_int and the callee prologue would root it.
+rest_runtime_args = [1, 2, 3]
+expect_nome("rest_splat_static") { Base.new.method(:rest_unused).call(*rest_runtime_args) }
+
+# A statically-bound fixed-arity Method given a runtime splat must validate
+# the run-time count: previously a short splat filled the missing slots and a
+# long one dropped the surplus.
+expect_raise("static_splat_short") { Base.new.method(:two_args).call(*[1]) }
+expect_raise("static_splat_long")  { Base.new.method(:two_args).call(*[1, 2, 3]) }
+expect_raise("static_call_over")   { Wide.new.method(:m16).call(*wide_args) }
+expect_raise("static_toproc_over") { Wide.new.method(:m16).to_proc.call(*wide_args) }
+
+# A parameter default that reads an earlier parameter is evaluated at the call
+# site; the bound-Method path must alias the earlier argument so `a` resolves
+# (it used to emit the callee's `lv_a`, a C compile failure).
+class RefDefault
+  def m(a, b = a + 5) = [a, b]
+end
+puts RefDefault.new.method(:m).call(1).inspect
+ref_arg = [1]
+puts RefDefault.new.method(:m).call(*ref_arg).inspect
+
+# A typed-array adapter's synthesized C function has a fixed parameter count:
+# supplying fewer leaves its later parameters reading an undefined register
+# (a garbage element written into the array) where CRuby raises ArgumentError.
+adapt = [1, 2]
+expect_raise("adapter_set_short")  { adapt.method(:[]=).call(0) }
+expect_raise("adapter_set_splat")  { adapt.method(:[]=).call(*[0]) }
+empty_args = []
+expect_raise("adapter_set_empty")  { adapt.method(:[]=).call(*empty_args) }
+sadapt = ["x"]
+expect_raise("sadapter_set_short") { sadapt.method(:[]=).call(0) }
+
+# A rest target whose optionals before the rest are omitted cannot be expanded
+# into the fixed cast (the omitted registers and the rest pointer are never
+# passed): decline like the poly-slot route instead of calling out of bounds.
+class RestOpt
+  def m(a, b = 2, *r) = a + b
+end
+expect_nome("rest_opt_short") { RestOpt.new.method(:m).call(1) }
+puts RestOpt.new.method(:m).call(1, 9).inspect
