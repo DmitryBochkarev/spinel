@@ -3,6 +3,7 @@
 # design record: docs/internals/spin.md.
 
 require_relative "spin/toml"
+require "spin_version"   # build/spin_version.rb: the release and revision this spin was built from
 
 $spin_hasher = ""   # memoized content-hasher command (native_hasher)
 $spin_verbose = ENV["SPIN_VERBOSE"].to_s != ""   # --verbose / SPIN_VERBOSE=1
@@ -2523,7 +2524,12 @@ when "build", "run", "test", "clean"
     puts "cleaned"
   end
 when "--version"
-  puts "spin"
+  # spin's own build first; then the compiler it would drive, which is the
+  # sibling binary when spin is installed beside it and otherwise the one on
+  # PATH, so the two lines can legitimately differ.
+  puts "spin #{SPIN_RELEASE} (#{SPIN_BUILD_REV})"
+  sv = sh_read(spinel_bin + " --version").strip
+  puts sv if sv != ""
 else
   puts SPIN_USAGE
   exit(cmd == "" || cmd == "help" || cmd == "--help" ? 0 : 3)
