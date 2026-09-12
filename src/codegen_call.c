@@ -4654,9 +4654,11 @@ static void abi_sig_token(TyKind t, char *out) {
 /* Classify the C function a statically-bound Method points at for the legacy
    `sp_int (*)(void *, sp_int...)` cast the poly callable path uses, reading
    the target's parameter/return types the dynamic call site cannot see. The
-   Method arm boxes the sp_int C return with sp_bm_box_ret, and a regular
-   method's recorded kind is always Integer, so only a TY_INT return is
-   callable here (the synthesized typed-array adapters set legacy_ret instead).
+   Method arm boxes the sp_int C return with sp_bm_box_ret, and every target
+   whose C return fits the register records its kind there (a plain Integer,
+   String, Bigint, nil, bool, Symbol, typed array, or user object; the
+   synthesized typed-array adapters record theirs too), so the return-kind
+   arms below accept each of those and decline the rest.
    Otherwise: 0 declines; 1 means the target is callable
    with *out_sig holding a per-position C ABI type token sequence and
    *out_fixed the number of fixed positional C slots. A rest parameter,

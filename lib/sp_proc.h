@@ -66,10 +66,12 @@ void sp_curry_publish_args(sp_Curry *c);
 #define SP_BM_SELF_NONE 0   /* not a reference: a number, a class value, unbound */
 #define SP_BM_SELF_OBJ  1
 #define SP_BM_SELF_STR  2
-/* How the legacy sp_int C return is boxed back into a Ruby value. A regular
-   method riding the cast can only return TY_INT, but a synthesized typed-array
-   adapter (`<int_array>.method(:push)`) has an sp_int C return whose Ruby value
-   is the array/string it launder through the register. */
+/* How the legacy sp_int C return is boxed back into a Ruby value. Any method
+   whose C return fits the register records its kind here: a plain Integer, a
+   `const char *` String, a nullable `sp_Bigint *`, a void/nil, a bool, a
+   Symbol id, a typed-array or user-object pointer. A synthesized typed-array
+   adapter (`<int_array>.method(:push)`) launders the array/string it returns
+   through the same register. */
 #define SP_BM_RET_INT       0
 #define SP_BM_RET_STR       1
 #define SP_BM_RET_INT_ARRAY 2
@@ -113,10 +115,12 @@ typedef struct sp_BoundMethod { void *self; sp_int fn; const char *name; sp_int 
                         independent of legacy_int_abi: an object-bound Method
                         with a non-int return still needs its self slot. */
   sp_int legacy_int_abi; /* whether the target can ride the legacy sp_int-cast poly-call
-                            path: 0 declines, 1 callable. A regular method is only
-                            callable with a TY_INT C return; a synthesized __bam_
-                            wrapper and the typed-array adapters may instead launder a
-                            String/array, recorded by legacy_ret. See
+                            path: 0 declines, 1 callable. A regular method rides when
+                            its C return is a box-able kind recorded by legacy_ret
+                            (Integer/String/Bigint/nil/bool/Symbol/typed array/user
+                            object); a float, by-value struct, or unclassifiable
+                            return declines. A synthesized __bam_ wrapper and the
+                            typed-array adapters record their kind the same way. See
                             method_legacy_int_abi (#4395). */
   const char *legacy_sig; /* per-position C ABI type tokens, eight chars each, or NULL.
                              Each scalar kind (int/bool/symbol/nil) has its own token,
@@ -144,10 +148,12 @@ static inline sp_BoundMethod *sp_bound_method_new(void *self, sp_int self_kind, 
    (#4395). */
 static inline sp_BoundMethod *sp_bm_set_abi(sp_BoundMethod *m, sp_int recv_bound, sp_int legacy_int_abi, const char *legacy_sig, sp_int legacy_fixed, sp_int legacy_rest, sp_int legacy_ret) { m->recv_bound = recv_bound; m->legacy_int_abi = legacy_int_abi; m->legacy_sig = legacy_sig; m->legacy_fixed = legacy_fixed; m->legacy_rest = legacy_rest; m->legacy_ret = legacy_ret; return m; }
 /* Box the raw sp_int a legacy-ABI Method returned according to the Ruby return
-   the bind site recorded. A regular method is always SP_BM_RET_INT; a typed
-   array adapter that returns self (push) or a laundered element (StrArray
-   get/set) boxes the real value instead of mis-tagging the pointer as an
-   Integer (#4395). A Bigint pointer boxes into its Ruby value. SP_BM_RET_INT
+   the bind site recorded. A plain Integer return is SP_BM_RET_INT; a String or
+   Bigint return, an array-returning method, and a void/bool/Symbol return each
+   box their own kind; a typed array adapter that returns self (push) or a
+   laundered element (StrArray get/set) boxes the real value instead of
+   mis-tagging the pointer as an Integer (#4395). A Bigint pointer boxes into
+   its Ruby value. SP_BM_RET_INT
    goes through sp_box_int_or_nil: an IntArray
    `[]` out of range answers the nullable SP_INT_NIL sentinel (INTPTR_MIN),
    which sp_box_int would hand back as a truthy Integer instead of nil, and a

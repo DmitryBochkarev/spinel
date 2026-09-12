@@ -108,6 +108,56 @@ Limited today, but additively fixable; listed roughly easiest-first.
 | A Hash iterator handed a callable whose arity the compiler cannot see (`h.map(&f)` where `f` came from a method call) | `NoMethodError` naming a method Hash has | `recv.<iter>(&callable)` is desugared to a literal block, and for a Hash receiver the block's shape depends on the callable's arity: a 1-param callable gets the `[k, v]` pair as one array, a 2-param one gets `k` and `v` positionally. When the callable is a local or ivar holding a proc/lambda literal, or a `method(:m)`, that arity is visible and every Enumerable name works. When it arrives from an opaque expression the desugar declines, and the call reaches run time unlowered. An Array receiver is unaffected, since its block shape is the same either way. Passing the block literally (`h.map { \|k, v\| ... }`) or writing `&proc { ... }` at the call site always works |
 | A promoted value stored into an int-typed Array (`--int-overflow=promote`) | truncated back to int64 by the store | the array's element type has to widen with the value; blanket-widening every int array costs promote mode more than it buys, so this wants a data-flow rule. Seeding the array with one value past 2^63 (or holding the state in a scalar) keeps the promotion today |
 
+### Bound Methods read out of poly slots
+
+A callable boxed into a poly container (`[obj.method(:m)][0].call(x)`) is
+dispatched at run time, so the call site cannot see the target's C signature.
+Spinel stamps that signature on the `Method` at its statically known bind site
+and the poly path calls it through a legacy `sp_int` register ABI. The return
+kinds it boxes are Integer, String, Bigint, nil, `true`/`false`, Symbol, a typed
+array, and a user object. The parameters must fit the same register, so a few
+argument lists still decline with `NoMethodError` where CRuby answers:
+
+- A pointer argument (a String, an Array, a user object) reaches the target
+  only when the target's parameter is statically that same pointer kind. A
+  pointer argument to an untyped parameter -- one the analyzer seeded as
+  `Integer` because every visible call passed a number -- or a pointer of the
+  wrong kind (`[k.method(:str)][0].call([1, 2, 3])`) declines.
+- A method with a rest parameter always declines: its trailing `sp_PolyArray *`
+  has no slot in the static cast, and the prologue would root the garbage
+  register the cast left there.
+- A splatted call with more than 16 arguments declines; the callable ABI packs
+  at most 16 positional slots. (CRuby raises `ArgumentError` for a fixed-arity
+  target called with the same count, so the answer is still an exception, just
+  a different one.)
+
+A typed-array adapter Method (`arr.method(:push)`) reports the CRuby arity of
+the Array op it stands in for (`-1`) except for `[]`, whose adapter Method still
+reports `1` through a poly slot where CRuby answers `-1`.
+
+#### Exception protocol from a genuinely poly value
+
+An `Exception` subclass instance held in a genuinely poly value -- read out of
+a heterogeneous container, or returned through a poly `Proc` -- dispatches
+`#class` and `#inspect`, but `#message` raises `NoMethodError` and `#to_s` falls
+back to `#<MyErr:0x...>` instead of the message, where CRuby answers the message
+from both:
+
+```ruby
+class MyErr < StandardError; end
+arr = [MyErr.new("boom"), 5]
+e = arr[0]
+e.class      # => MyErr          (as CRuby)
+e.inspect    # => #<MyErr: boom> (as CRuby)
+e.message    # => NoMethodError  (CRuby: "boom")
+e.to_s       # => #<MyErr:0x...> (CRuby: "boom")
+```
+
+The class and message are carried on the boxed value, but the `#message`/`#to_s`
+arm is only emitted for a receiver whose static type names the exception class.
+The behavior predates and is independent of the bound-Method work above: it
+reproduces through a poly `Proc` result as well.
+
 ### Sockets
 
 `require "socket"` is mandatory (see [require.md](require.md)); without it the
