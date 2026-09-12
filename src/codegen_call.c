@@ -27178,9 +27178,11 @@ else {
   /* String#concat with no arguments returns the receiver unchanged (#2309) */
   if (recv >= 0 && rt == TY_STRING && sp_streq(name, "concat") && argc == 0) {
     /* zero-argument concat returns the receiver, but CRuby checks frozen
-       first -- the empty append is still a mutation attempt (#3339) */
-    buf_puts(b, "(sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, "), ");
-    emit_expr(c, recv, b); buf_puts(b, ")");
+       first -- the empty append is still a mutation attempt (#3339). The
+       receiver once: a call with effects must not run twice. */
+    int tcc = ++g_tmp;
+    buf_printf(b, "({ const char *_t%d = ", tcc); emit_expr(c, recv, b);
+    buf_printf(b, "; sp_str_check_mutable(_t%d); _t%d; })", tcc, tcc);
     return;
   }
   /* String#clear consumed as a value: empty the assignable receiver in place
