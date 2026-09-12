@@ -7399,8 +7399,11 @@ int emit_scalar_call(Compiler *c, int id, Buf *b) {
          `b` and non-bang `encode` return a NEW string, so they never raise. */
       /* zero-argument concat / prepend return the receiver; a frozen one still
          raises, as CRuby checks before the (empty) append (#3339). */
-      else if ((sp_streq(name, "concat") || sp_streq(name, "prepend")) && argc == 0)
-        buf_printf(b, "(sp_str_check_mutable(%s), (%s))", r, r);
+      else if ((sp_streq(name, "concat") || sp_streq(name, "prepend")) && argc == 0) {
+        /* the receiver once: it is a call with effects as often as a local */
+        int trc0 = ++g_tmp;
+        buf_printf(b, "({ const char *_t%d = %s; sp_str_check_mutable(_t%d); _t%d; })", trc0, r, trc0, trc0);
+      }
       else if ((sp_streq(name, "force_encoding") || sp_streq(name, "encode!")) && argc <= 2)
         emit_str_force_encoding(c, r, argv, argc, b);
       else if ((sp_streq(name, "=~") || sp_streq(name, "!~")) && argc == 1 &&
@@ -10156,7 +10159,11 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
    left the string naming UTF-8 -- and spinel's one tag is exactly what that
    argument asks for. A constant path (Encoding::BINARY) or a string literal
    both name it; anything else keeps the no-op, since spinel has no third
-   encoding to move to. */
+   encoding to move to.
+   The receiver is evaluated ONCE, into a temp: it feeds both the mutability
+   check and the retag, and a receiver that is a call with effects --
+   campfire's `request.body.read.force_encoding("UTF-8")`, where `read`
+   advances a cursor -- ran twice and retagged the second, empty, read. */
 static void emit_str_force_encoding(Compiler *c, const char *r, const int *argv, int argc, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *fe_nm = NULL;
@@ -10179,9 +10186,11 @@ static void emit_str_force_encoding(Compiler *c, const char *r, const int *argv,
     fe_bin = sp_streq(fe_up, "ASCII-8BIT") || sp_streq(fe_up, "BINARY");
     fe_txt = sp_streq(fe_up, "UTF-8");
   }
-  if (fe_bin) buf_printf(b, "(sp_str_check_mutable(%s), sp_str_as_binary(%s))", r, r);
-  else if (fe_txt) buf_printf(b, "(sp_str_check_mutable(%s), sp_str_as_text(%s))", r, r);
-  else buf_printf(b, "(sp_str_check_mutable(%s), (%s))", r, r);
+  int trc = ++g_tmp;
+  buf_printf(b, "({ const char *_t%d = %s; sp_str_check_mutable(_t%d); ", trc, r, trc);
+  if (fe_bin) buf_printf(b, "sp_str_as_binary(_t%d); })", trc);
+  else if (fe_txt) buf_printf(b, "sp_str_as_text(_t%d); })", trc);
+  else buf_printf(b, "_t%d; })", trc);
 }
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b) {
   const NodeTable *nt = c->nt;
