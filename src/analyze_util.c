@@ -1772,6 +1772,24 @@ int method_obj_target_mi(Compiler *c, int node) {
   return -1;
 }
 
+/* The Ruby return kind of a typed-array adapter Method (`<array>.method(:op)`)
+   with no target scope: IntArray `push` answers the array, `[]`/`[]=` the int
+   element; StrArray `push` the array, `[]`/`[]=` the String element; anything
+   else is TY_UNKNOWN (not an adapter). The analyzer's inferred type and the
+   codegen's stamped SP_BM_RET_* must not drift -- both read this helper. */
+TyKind method_obj_adapter_ret(TyKind arr, const char *op) {
+  if (!op) return TY_UNKNOWN;
+  if (arr == TY_INT_ARRAY) {
+    if (sp_streq(op, "push")) return TY_INT_ARRAY;
+    if (sp_streq(op, "[]") || sp_streq(op, "[]=")) return TY_INT;
+  }
+  else if (arr == TY_STR_ARRAY) {
+    if (sp_streq(op, "push")) return TY_STR_ARRAY;
+    if (sp_streq(op, "[]") || sp_streq(op, "[]=")) return TY_STRING;
+  }
+  return TY_UNKNOWN;
+}
+
 /* Is this Method-typed expression an UNBOUND method (Klass.instance_method
    with no #bind crossed)? Resolves the same way method_recv_node does, but a
    bind on the path means the value is bound (#2724). */

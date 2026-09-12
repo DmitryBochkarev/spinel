@@ -1975,11 +1975,14 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     int mn = method_recv_node(c, recv);
     int mi = mn >= 0 ? method_obj_target_mi(c, mn) : -1;
     if (mi >= 0) return c->scopes[mi].ret == TY_UNKNOWN ? TY_INT : c->scopes[mi].ret;
-    /* Unresolved target (a Method that arrived through a parameter or a
-       slot): the value is whatever the target answers, boxed by the return
-       kind its bind site stamped, so the call yields poly (#4445). Reading
-       the raw sp_int as an Integer answered a String's pointer. Under
-       promote it was always poly: every method is poly-signatured there. */
+    /* Unresolved target -- a Method that arrived through a parameter or a
+       slot, or a typed-array adapter (`<array>.method(:op)`) with no target
+       scope. The value is whatever the target answers, boxed by the return
+       kind its bind site stamped, so the call yields poly (#4445); the
+       adapter's kind is stamped from method_obj_adapter_ret at the bind site.
+       Reading the raw sp_int as an Integer answered a String's pointer.
+       Under promote it was always poly: every method is poly-signatured
+       there. */
     return TY_POLY;
   }
   if (recv >= 0 && rt == TY_METHOD && argc == 0 && sp_streq(name, "to_proc")) return TY_PROC;

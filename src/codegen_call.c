@@ -17298,6 +17298,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        element; the other adapters launder the array or a String through the
        register and must not be boxed as Integers (#4395). */
     int bop_ret = 0;    /* SP_BM_RET_INT */
+    int bop_is_adapter = 0;  /* target is a synthesized typed-array adapter */
     char bop_sig[8 * 64 + 1]; bop_sig[0] = 0;  /* typed-array adapter ABI signature */
     buf_puts(b, mi >= 0 ? "sp_bm_set_abi(sp_bound_method_new_d(" : "sp_bm_set_abi(sp_bound_method_new(");
     /* A Method bound to a class/module (Klass.method(:cmeth)) has no instance
@@ -17330,16 +17331,22 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
       if (bop) {
         mi_legacy = 1;
+        bop_is_adapter = 1;
         bop_argc = (bop[0] == 's') ? 2 : 1;  /* set=2, get/push=1 */
         /* memoized per (kind, op): emit the adapter once */
         static char bam_done[2][3];
         int ki = (brt == TY_INT_ARRAY) ? 0 : 1;
         int oi = bop[0] == 'g' ? 0 : bop[0] == 's' ? 1 : 2;
-        /* The non-promote adapter's Ruby return: an IntArray adapter answers
-           an int (the element / the assigned value) except push, which
-           answers the array; a StrArray adapter answers a String for get/set
-           (laundered through the register) and the array for push. */
-        bop_ret = (ki == 0) ? (oi == 2 ? 2 : 0) : (oi == 2 ? 3 : 1);
+        /* The non-promote adapter's Ruby return comes from the shared helper
+           (which also drives the analyzer's inferred type): an IntArray
+           adapter answers the array for push and the int element otherwise;
+           a StrArray adapter answers the array for push and the laundered
+           String element for get/set. */
+        TyKind art = method_obj_adapter_ret(brt, sym);
+        bop_ret = art == TY_INT_ARRAY ? 2 /* SP_BM_RET_INT_ARRAY */
+                : art == TY_STR_ARRAY ? 3 /* SP_BM_RET_STR_ARRAY */
+                : art == TY_STRING    ? 1 /* SP_BM_RET_STR */
+                : 0 /* SP_BM_RET_INT */;
         /* A StrArray adapter launders its String element through the sp_int
            slot: the value is arg 1 of []= and arg 0 of push. The int array
            and the StrArray index are scalars. The stamped signature mirrors
@@ -17438,7 +17445,15 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
     }
     emit_str_literal(b, disp);
-    { int ar; if (mi >= 0 && method_scope_arity(c, mi, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", SP_INT_NIL"); }
+    { int ar; if (mi >= 0 && method_scope_arity(c, mi, &ar)) buf_printf(b, ", (sp_int)%d", ar);
+      else if (bop_is_adapter) {
+        /* An adapter has no method scope: stamp CRuby's arity for the Array op
+           it stands in for (`push`/`[]`/`[]=` are all -1), not SP_INT_NIL. */
+        int ba;
+        if (builtin_method_arity("Array", sym, &ba)) buf_printf(b, ", (sp_int)%d", ba);
+        else buf_puts(b, ", SP_INT_NIL");
+      }
+      else buf_puts(b, ", SP_INT_NIL"); }
     if (mi >= 0) {
       char _db[512]; BUILD_METHOD_DESC(mi, disp, 0, _db);
       buf_puts(b, ", "); emit_str_literal(b, _db);
@@ -18080,6 +18095,17 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
        cast would truncate the boxed args and return to garbage. */
     int poly_abi = !tm && g_promote_mode;
     TyKind tret = tm ? (TyKind)tm->ret : (poly_abi ? TY_POLY : TY_INT);
+    /* A typed-array adapter (`<array>.method(:op)`) has no target scope; its
+       Ruby return is op-dependent. Read it from the same shared helper the
+       bind site stamps SP_BM_RET_* from, so the call site casts the raw
+       register to the array/String it really is instead of an Integer. */
+    if (!tm && !g_promote_mode) {
+      int arecv = mn >= 0 ? nt_ref(nt, mn, "receiver") : -1;
+      const char *asym = mn >= 0 ? method_sym_arg(c, mn) : NULL;
+      TyKind at = (arecv >= 0 && asym)
+                    ? method_obj_adapter_ret(comp_ntype(c, arecv), asym) : TY_UNKNOWN;
+      if (at != TY_UNKNOWN) tret = at;
+    }
     if (!is_scalar_ret(tret)) tret = TY_INT;  /* aggregate ret: raw carrier */
     /* A trailing splat with a statically-known target expands into the
        remaining declared params from the splatted array (#3248); the

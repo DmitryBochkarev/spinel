@@ -7,7 +7,9 @@
 # return all declined with NoMethodError even though CRuby answers them; a
 # plain `def s` returns `const char *` just like the synthesized wrapper, so it
 # is boxed by the String kind too, and a Bigint return is a nullable
-# `sp_Bigint *` riding the register.
+# `sp_Bigint *` riding the register. The typed-array adapter's statically
+# dispatched `.call` handed the raw sp_int register back as an Integer instead
+# of casting it to the array/string it really is, and its `.arity` was nil.
 #
 # Every printed line is CRuby-equal; the snapshot comes from reference Ruby.
 
@@ -53,3 +55,30 @@ puts bslot[0].call(0)
 puts bslot[0].call(0).to_s.length
 puts bslot[0][0]
 puts bslot[0].to_proc.call(0)
+
+# typed-array adapter static `.call`: the raw sp_int register is cast back to
+# the array/string it really is, and the adapter reports CRuby's arity
+ia = [1, 2]
+puts ia.method(:push).call(3).inspect
+puts ia.inspect
+puts ia.method(:[]=).call(0, 7).inspect
+puts ia.inspect
+puts ia.method(:[]).call(1).inspect
+puts ia.method(:[]).call(9).inspect
+puts ia.method(:push).arity
+puts ia.method(:[]=).arity
+puts ia.method(:[]).arity
+sa = ["x"]
+puts sa.method(:push).call("y").inspect
+puts sa.inspect
+puts sa.method(:[]=).call(0, "z").inspect
+puts sa.inspect
+puts sa.method(:[]).call(0).inspect
+puts sa.method(:[]).call(9).inspect
+puts sa.method(:push).arity
+puts sa.method(:[]=).arity
+puts sa.method(:[]).arity
+# the same adapter read back out of a poly slot also reports its arity
+pslot = [sa.method(:push)]
+puts pslot[0].call("w").inspect
+puts pslot[0].arity.inspect

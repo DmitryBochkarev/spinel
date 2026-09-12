@@ -127,7 +127,8 @@ puts [Base.new.method(:opt)][0].call(1, 2)
 puts [Base.new.method(:opt)][0][3, 4]
 expect_nome("optional_short") { [Base.new.method(:opt)][0].call(1) }
 
-# A typed-array adapter Method must report no stamped arity (#4395).
+# A typed-array adapter Method reports the CRuby arity of the Array op it
+# stands in for (-1), not a nil placeholder (#4395).
 pa = ["x"].method(:push)
 pslot = [pa]
 puts "adapter_arity: #{pslot[0].arity.inspect}"
