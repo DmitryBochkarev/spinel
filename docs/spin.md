@@ -150,13 +150,13 @@ entries. Set `SPIN_INDEX` to use another index (a `file://` URL works).
 
 ### The compiler's own version
 
-`spinel --version` prints the build revision first and the release it belongs
-to after it:
+`spinel --version` prints the release the build belongs to, then the build
+revision in parentheses, then the C compiler:
 
 ```
-spinel 6b8ddcd88dd9 (2026.09.08) [cc (Ubuntu 13.3.0) 13.3.0]
-spinel 281cd145ffb4 (2026.09.08+1) [cc ...]     # one commit past that release
-spinel 6b8ddcd88dd9 (unreleased) [cc ...]       # before the first release
+spinel 2026.09.12 (112bae85) [cc (Ubuntu 13.3.0) 13.3.0]
+spinel 2026.09.12+7 (94b68d85) [cc ...]     # seven commits past that release
+spinel unreleased (6b8ddcd8) [cc ...]       # before the first release
 ```
 
 Releases are dated: `YYYY.MM.DD`, with `.N` appended for a second release on
@@ -166,9 +166,11 @@ padded to a width guessed in advance. The name says when a release was cut and
 claims nothing about how finished it is; what a release promises is recorded
 in `docs/limitations.md` and in the tests, not in the number.
 
-The revision comes first and stays first: it is what tells two builds of one
-release apart, and `spin` reads that field as the toolchain identity for its
-probe records.
+The revision is git's own short form (as long as it needs to be unique in the
+repository, seven digits at least); it is what tells two builds of one release
+apart, and `spin` reads it from the parentheses as the toolchain identity for
+its probe records. `+N` is not part of a release name: it marks a build N
+commits past the release, and only a tag makes a release.
 
 ### What a release is allowed to say
 

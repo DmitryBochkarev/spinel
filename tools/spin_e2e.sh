@@ -299,7 +299,7 @@ echo "$OUT" | grep -q "name policy" || fail "name-policy message"
 # --- R8 probes: publish records a pass; resolution warns on recorded fails -------
 grep -q '^\[\[probe\]\]$' "$WORK/index/packages/publib.toml" || fail "publish wrote no probe record"
 grep -q '^result = "pass"$' "$WORK/index/packages/publib.toml" || fail "probe record isn't a pass"
-REV=$(cd "$WORK" && "$(dirname "$SPIN")/spinel" --version | awk '{print $2}')
+REV=$(cd "$WORK" && "$(dirname "$SPIN")/spinel" --version | awk '{print $3}' | tr -d '()')
 printf '\n[[probe]]\nversion = "0.1.0"\nspinel = "%s"\nresult = "fail"\ndetail = "e2e-injected"\ndate = "2026-01-01"\n' "$REV" >> "$WORK/index/packages/publib.toml"
 git -C "$WORK/index" add packages/publib.toml
 git -C "$WORK/index" -c user.email=spin@e2e -c user.name=spin-e2e commit -qm failprobe

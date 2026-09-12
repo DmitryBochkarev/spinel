@@ -184,7 +184,7 @@ dist: deps
 	@mkdir -p build/dist
 	@rm -rf build/dist/$(DIST_NAME) build/dist/$(DIST_NAME).tar.xz
 	git archive --format=tar --prefix=$(DIST_NAME)/ HEAD | tar -xf - -C build/dist
-	@printf '%s\n%s\n' "$$(git rev-parse --short=12 HEAD)" "$(DIST_RELEASE)" > build/dist/$(DIST_NAME)/.spinel-dist
+	@printf '%s\n%s\n' "$$(git rev-parse --short HEAD)" "$(DIST_RELEASE)" > build/dist/$(DIST_NAME)/.spinel-dist
 	@mkdir -p build/dist/$(DIST_NAME)/vendor
 	cp -R vendor/prism vendor/rbs build/dist/$(DIST_NAME)/vendor/
 	tar -C build/dist -cJf build/dist/$(DIST_NAME).tar.xz $(DIST_NAME)
@@ -253,15 +253,16 @@ build/csrc/%.o: src/%.c $(SPINEL_HDRS) | build/csrc
 # tag: "2026.09.08" when HEAD is the release, "2026.09.08+12" when it is twelve
 # commits past it, "unreleased" before the first tag. The --match patterns ARE
 # the format rule -- a tag shaped any other way is not a release, and is
-# ignored here rather than breaking anyone's build. The revision stays the
-# FIRST field of `spinel --version`: it is what identifies a build (two builds
-# of one release share a name and differ here), and tools/spin.rb reads that
-# field for the toolchain key its probe records are stored under.
+# ignored here rather than breaking anyone's build. The revision is git's own
+# short form (unique in the repository, seven digits at least): it is what
+# identifies a build (two builds of one release share a name and differ
+# here), and tools/spin.rb reads it from the parentheses of `spinel --version`
+# for the toolchain key its probe records are stored under.
 # A source archive from `make dist` carries no .git: it records the revision
 # and release it was cut from in .spinel-dist, and a build from it reads them
 # there so its `spinel --version` names the build it is.
 build/csrc/spinel_rev.h: FORCE | build/csrc
-	@r=$$(git rev-parse --short=12 HEAD 2>/dev/null); \
+	@r=$$(git rev-parse --short HEAD 2>/dev/null); \
 	d=$$(git describe --tags --match '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]' \
 	       --match '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]*' 2>/dev/null); \
 	if [ -z "$$r" ] && [ -f .spinel-dist ]; then r=$$(sed -n 1p .spinel-dist); d=$$(sed -n 2p .spinel-dist); fi; \

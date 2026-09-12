@@ -147,11 +147,13 @@ def spinel_bin
   "spinel"  # PATH fallback
 end
 
-# the compiler build revision ("spinel <sha>"), "" when unknown -- keys the
-# R8 probe records; a git SHA is the toolchain version until semver exists
+# the compiler build revision -- the parenthesised word of
+# "spinel <release> (<sha>) [...]" -- "" when unknown; keys the R8 probe
+# records, since two builds of one release differ only there
 def spinel_rev
   f = sh_read(spinel_bin + " --version").split(" ")
-  r = f.length >= 2 ? f[1] : ""
+  r = f.length >= 3 ? f[2] : ""
+  r = r[1, r.length - 2] if r.length >= 2 && r[0] == "(" && r[r.length - 1] == ")"
   r == "unknown" ? "" : r
 end
 

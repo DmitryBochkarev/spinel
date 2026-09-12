@@ -67,7 +67,8 @@ spin run              # compile bin/myapp.rb and run it
 ```
 
 Releases are dated tags, `YYYY.MM.DD` (`spinel --version` names the one a
-build belongs to, and `+N` past it); the name says when a release was cut,
+build belongs to, `+N` when the build is N commits past it, then the git
+revision in parentheses); the name says when a release was cut,
 and what it promises is in [docs/limitations.md](docs/limitations.md) and the
 tests. The first one is `2026.09.12`. Each release carries a source archive
 (`spinel-<release>.tar.xz`, what `make dist` produces) with the vendored
