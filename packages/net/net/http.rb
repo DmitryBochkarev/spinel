@@ -333,7 +333,11 @@ module Net
     def open_connection
       @socket = connect_with_timeout
       if @use_ssl
-        tls = OpenSSL::SSL::SSLSocket.new(@socket)
+        begin
+          tls = OpenSSL::SSL::SSLSocket.new(@socket)
+        rescue NameError
+          raise "net/http: an https request needs the openssl package (require \"openssl\")"
+        end
         tls.hostname = @address
         tls.connect
         @tls = tls
