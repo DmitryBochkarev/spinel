@@ -170,7 +170,7 @@ void sp_gc_wb_slow(void *obj);
    lending site was, it already decided. */
 void sp_gc_pin_remembered_slow(void *obj);
 static inline void sp_gc_pin_remembered(void *obj) {
-  if (__builtin_expect(sp_gc_minor_on, 0)) sp_gc_pin_remembered_slow(obj);
+  if (__builtin_expect(sp_gc_minor_on, 1)) sp_gc_pin_remembered_slow(obj);
 }
 #define SP_GC_PINNED_MAX 16384
 extern void *sp_gc_pinned[SP_GC_PINNED_MAX];
@@ -183,7 +183,7 @@ static inline void sp_gc_wb(void *obj) {
      for a reader that never comes. rubys observed the other half of this from
      the source: `old` is set on every survivor regardless of the mode, so the
      barrier was doing its full work in both. */
-  if (__builtin_expect(sp_gc_minor_on, 0)) {
+  if (__builtin_expect(sp_gc_minor_on, 1)) {
     /* With the mark on, the common case -- a young holder, or an old one
        already recorded -- is decided here from the header the store is about
        to touch anyway, so the call is paid only by a store that actually

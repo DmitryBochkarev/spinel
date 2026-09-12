@@ -189,11 +189,14 @@ __attribute__((constructor)) static void sp_gc_debug_env(void){
   { const char *fi=getenv("SPINEL_GC_FULL_INTERVAL");
     if(fi&&*fi){ int n=atoi(fi); if(n>0&&n<=4096){ sp_gc_full_interval=n; sp_gc_full_interval_fixed=1; } } }
   { const char *g=getenv("SPINEL_GC_VERIFY_GEN"); sp_gc_verify_gen=(g&&*g&&*g!='0');
-    /* Opt-in again: the barrier still misses at least one store. A 9-benchmark
-       prefix of the LangArena suite corrupts a live Hash with the minor mark
-       on and is clean without it, which is a missed barrier by construction.
-       SPINEL_GC_MINOR=1 turns it on. */
-    const char *mn=getenv("SPINEL_GC_MINOR"); sp_gc_minor_on=(mn&&*mn&&*mn!='0');
+    /* The default since 2026-09-12. What made it one: every test program
+       clean under the generational verifier with stress on (every allocation
+       collects, so every survivor promotes and any holder the barrier missed
+       is named), the LangArena suite at 0.94x wall and 0.7x peak RSS end to
+       end, and the Rails-shaped application (#4311) green on its minor leg.
+       SPINEL_GC_MINOR=0 is the way back: the collector then marks the whole
+       heap on every cycle, as it did before the barrier landed. */
+    const char *mn=getenv("SPINEL_GC_MINOR"); sp_gc_minor_on=!(mn&&*mn&&*mn=='0');
     const char *ag=getenv("SPINEL_GC_AGE"); if(ag&&*ag) sp_gc_age_on=(*ag!='0');
     if(sp_gc_verify_gen) sp_gc_minor_on=1; }
   /* Read here rather than in sp_alloc_worker_tune, which a single-threaded
@@ -284,7 +287,7 @@ unsigned sp_gc_mark_gen = 0;
    walked, because the sweep does not free the old list on a minor cycle and
    the remembered set carries the old->young references the walk would miss. */
 int sp_gc_minor = 0;
-int sp_gc_minor_on = 0;
+int sp_gc_minor_on = 1;   /* the constructor above reads SPINEL_GC_MINOR=0 */
 int sp_gc_verify_gen = 0;
 int sp_gc_verify_gen_fail = 0;
 int sp_gc_verify_probe_on = 0, sp_gc_verify_probe_hit = 0;

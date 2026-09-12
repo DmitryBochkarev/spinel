@@ -122,6 +122,7 @@ These are deliberate consequences of real parallelism, listed in
 |---|---|
 | `SPINEL_WORKERS` | number of OS workers; overrides the online-core autodetect (min 1). Read at the first `Thread.new`, so a program can set it itself: `ENV["SPINEL_WORKERS"] = "1"` before spawning caps its own pool, and `... = "1" unless ENV["SPINEL_WORKERS"]` declares a default the environment still overrides |
 | `SPINEL_PREEMPT_SIGNAL` | the signal the monitor uses to preempt a busy worker (default `SIGURG`) |
+| `SPINEL_GC_MINOR` | `0` turns the generational object mark off: every collection then marks the whole live heap. On by default since 2026-09-12: a minor cycle marks the young objects plus what the write barrier remembered of the old ones, and a full cycle runs on the cadence the survival ratio sets (`SPINEL_GC_FULL_INTERVAL=N` pins it). `SPINEL_GC_VERIFY_GEN=1` re-marks the whole heap after every minor and names any holder the barrier missed |
 | `SPINEL_GC_THRESHOLD_KB` | per-worker collection budget; raise it to trade memory for fewer stop-the-world pauses (default 256) |
 | `SPINEL_GC_THRESHOLD_OBJ_KB` | the same budget for the OBJECT heap alone, overriding the pair above |
 | `SPINEL_GC_THRESHOLD_STR_KB` | the same for the STRING heap alone |

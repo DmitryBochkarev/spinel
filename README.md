@@ -66,6 +66,11 @@ spin new myapp && cd myapp
 spin run              # compile bin/myapp.rb and run it
 ```
 
+Releases are dated tags, `YYYY.MM.DD` (`spinel --version` names the one a
+build belongs to, and `+N` past it); the name says when a release was cut,
+and what it promises is in [docs/limitations.md](docs/limitations.md) and the
+tests. The first one is `2026.09.12`.
+
 `spin` is the day-to-day interface — cargo/mix style. It scaffolds
 projects, resolves dependencies, drives the compiler, and runs tests; no
 Makefile, no hand-written `-I` flags:

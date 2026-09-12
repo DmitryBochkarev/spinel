@@ -805,11 +805,11 @@ reject-test: $(SPINEL)
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 
 # ---- Minor-mark leg (#4311) ----
-# The suite runs with the generational mark OFF, which is the default, so a
-# missed write barrier is invisible to it: the value stays reachable because
-# every collection is a full one. This runs the one program that is built to
-# catch that -- a young value stored into a long-lived thread-local map, held
-# only by the map between the write and the read -- under SPINEL_GC_MINOR=1.
+# The generational mark is the default (2026-09-12), so the suite runs under
+# it; this leg keeps the other mode honest too. Each program here is built to
+# catch a missed write barrier -- a young value stored into a long-lived
+# thread-local map, held only by the map between the write and the read --
+# and runs with the mark on and off, then under the verifier with stress.
 # It costs a fifth of a second, and it is the leg that was missing when a
 # barrier pointed at the wrong object shipped.
 # One leg per barrier gap that shipped. A single program was what this target
@@ -987,7 +987,10 @@ byref-capture-test: $(SPINEL) $(RBS_EXTRACT_BIN) $(SP_RT_LIB) $(SPINEL_TIMEOUT)
 #
 # The collection floor is here for the same reason as in threaded-render-test:
 # an arm that stops collecting still prints the right checksum and defends
-# nothing.
+# nothing. The marks-per-collection floor beside it asks whether the graph is
+# held live, which is a question about the FULL mark: that probe runs with
+# SPINEL_GC_MINOR=0, since a minor cycle walks the young objects plus the
+# remembered set and would answer a much smaller number for the same graph.
 #
 # LOCALITY_CHURN is NOT varied per arm, and that is deliberate twice over. It
 # is what decides how many workers a cell really runs -- the pool grows toward
@@ -1013,7 +1016,7 @@ gc-locality-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	        diff -u $(GC_LOCALITY_SRC).expected "$$tmp/out.$$b.$$w" | head -6; ok=0; }; \
 	  done; \
 	done; \
-	SPINEL_WORKERS=8 LOCALITY_BUILD=4 SPINEL_GC_PHASES=1 $(TIMEOUT60) "$$tmp/l" >/dev/null 2> "$$tmp/ph.err"; \
+	SPINEL_WORKERS=8 LOCALITY_BUILD=4 SPINEL_GC_PHASES=1 SPINEL_GC_MINOR=0 $(TIMEOUT60) "$$tmp/l" >/dev/null 2> "$$tmp/ph.err"; \
 	colls=$$(sed -n 's/^\[gc\] \([0-9]*\) collections.*/\1/p' "$$tmp/ph.err" | tail -1); \
 	marked=$$(sed -n 's/^\[gcph\] marked \([0-9]*\) objs.*/\1/p' "$$tmp/ph.err" | tail -1); \
 	[ -n "$$colls" ] && [ -n "$$marked" ] || \
@@ -1067,9 +1070,9 @@ threaded-render-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	  done; \
 	  unset SPINEL_GC_OBJ_BUDGET; \
 	done; \
-	SPINEL_WORKERS=8 SPINEL_GC_MINOR=1 $(TIMEOUT60) "$$tmp/r" > "$$tmp/out.minor" 2>/dev/null; \
+	SPINEL_WORKERS=8 SPINEL_GC_MINOR=0 $(TIMEOUT60) "$$tmp/r" > "$$tmp/out.minor" 2>/dev/null; \
 	cmp -s "$$tmp/out.minor" $(THREADED_RENDER_SRC).expected || \
-	  { echo "threaded-render-test: FAIL (SPINEL_GC_MINOR=1 changed the answer)"; ok=0; }; \
+	  { echo "threaded-render-test: FAIL (SPINEL_GC_MINOR=0 changed the answer)"; ok=0; }; \
 	SPINEL_WORKERS=8 SPINEL_GC_PHASES=1 $(TIMEOUT60) "$$tmp/r" >/dev/null 2> "$$tmp/ph.err"; \
 	colls=$$(sed -n 's/^\[gc\] \([0-9]*\) collections.*/\1/p' "$$tmp/ph.err" | tail -1); \
 	marked=$$(sed -n 's/^\[gcph\] marked \([0-9]*\) objs.*/\1/p' "$$tmp/ph.err" | tail -1); \
