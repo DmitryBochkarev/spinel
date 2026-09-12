@@ -1933,6 +1933,14 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       { *out = TY_STRING; return 1; }
     if (sp_streq(name, "subsec")) { *out = TY_POLY; return 1; }
   }
+  /* iso8601(n) / xmlschema(n) on a boxed Time: the fraction-digits form the
+     typed emitter serves, absent here (campfire's
+     `message.created_at.utc.iso8601(3)` over a nilable column). */
+  if (recv >= 0 && rt == TY_POLY && argc == 1 && nt_ref(nt, id, "block") < 0 &&
+      !an_user_defines_method(c, name) &&
+      (sp_streq(name, "iso8601") || sp_streq(name, "xmlschema")) &&
+      sp_feature_enabled("time"))
+    { *out = TY_STRING; return 1; }
   /* Range#to_a on a poly value: its element array. */
   if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
       !an_user_defines_method(c, name) && sp_streq(name, "to_a"))

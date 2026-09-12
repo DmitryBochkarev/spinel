@@ -4184,6 +4184,19 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
       return 1;
     }
   }
+  /* iso8601(n) / xmlschema(n): the fraction-digits form, as the typed emitter
+     serves it (sp_time_iso8601_frac). */
+  if (argc == 1 && (sp_streq(name, "iso8601") || sp_streq(name, "xmlschema")) &&
+      sp_feature_enabled("time")) {
+    int tv = ++g_tmp, dv = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
+    buf_printf(b, "; sp_int _t%d = ", dv); emit_int_expr(c, argv[0], b);
+    buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_TIME"
+                  " ? sp_time_iso8601_frac(*(sp_Time *)_t%d.v.p, _t%d)"
+                  " : (const char *)(sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)), NULL); })",
+               tv, tv, tv, dv, name, tv);
+    return 1;
+  }
   /* The rest of the Time surface on a boxed receiver: the typed emitter serves
      48 names here and this one served 15, so a Time narrowed out of an untyped
      value answered NoMethodError for the other 33 with a clean C build. The
