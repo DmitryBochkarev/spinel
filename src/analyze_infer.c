@@ -2038,15 +2038,13 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   /* <poly>.call(args): a boxed Proc publishes its result through the boxed
      return slot, so the value is genuinely dynamic -- type it poly and let
      the call site read the slot intact (unboxing to int truncated an array
-     or string result to garbage). (Skip when a user class defines `call`:
-     that goes through normal dispatch and returns the method's own type.) */
+     or string result to garbage). A boxed slot may hold a Proc regardless
+     of whether some user class defines `call` (the poly dispatch's callable
+     pre-arm routes it through the callable machinery), so the result stays
+     dynamic even then; the user methods' return type must not constrain it. */
   if (recv >= 0 && rt == TY_POLY &&
-      (sp_streq(name, "call") || sp_streq(name, "()"))) {
-    int has_user_call = 0;
-    for (int k = 0; k < c->nclasses && !has_user_call; k++)
-      if (comp_method_in_class(c, k, "call") >= 0) has_user_call = 1;
-    if (!has_user_call) return TY_POLY;
-  }
+      (sp_streq(name, "call") || sp_streq(name, "()")))
+    return TY_POLY;
 
   /* strftime on a poly value that is really a Time formats to a String. A
      nilable Time (`created_at : Time?`) is held as a poly sp_RbVal, so the

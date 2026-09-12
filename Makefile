@@ -535,8 +535,12 @@ TESTS := $(filter-out test/regexp_unicode_ctype.rb,$(TESTS))
 endif
 # Mode-incompatible: int_overflow_raises pins raise-mode semantics; under
 # --int-overflow=promote the same code auto-promotes and output diverges.
+# poly_call_legacy_abi_gate / poly_call_fast_abi_gate pin the raise/wrap legacy
+# sp_int Method ABI classification; promote boxes int parameters (and does not
+# consult that classification), so the same dynamic calls take a different
+# path there.
 ifeq ($(SPINEL_INT_OVERFLOW),promote)
-TESTS := $(filter-out test/int_overflow_raises.rb,$(TESTS))
+TESTS := $(filter-out test/int_overflow_raises.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb,$(TESTS))
 # Drive the spinel front-end and the C compile in promote mode so the test
 # rule actually exercises the auto-promotion path end to end.
 SP_OV_FLAG := --int-overflow=promote

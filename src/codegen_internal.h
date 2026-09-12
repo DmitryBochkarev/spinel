@@ -396,6 +396,7 @@ void emit_expr(Compiler *c, int id, Buf *b);
 int is_builtin_reopen(const char *name);
 int is_exc_name(const char *n);
 int class_is_exc_subclass(Compiler *c, int ci);
+int class_has_subclass(Compiler *c, int ocid);
 int exc_has_user_msg_override(Compiler *c);
 int exc_has_nonstring_msg_override(Compiler *c);
 int fi_fiber_stack_risk(Compiler *c);

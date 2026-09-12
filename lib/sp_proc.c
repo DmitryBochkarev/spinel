@@ -119,20 +119,125 @@ void sp_curry_publish_args(sp_Curry *c) {
 /* Method#to_proc: wrap the bound method in a Proc whose trampoline forwards
    through the (void *self, sp_int...) ABI (the arity dispatches the cast). */
 void sp_bm_cap_scan(void *p) { sp_gc_mark(p); }
+/* Whether every fixed position of the stamped signature is a scalar-kind
+   token (the TY_UNKNOWN wildcard 0 through TY_NIL 4; see abi_sig_token in
+   codegen_call.c). A pointer token is 100000 + TyKind. The generic
+   Method#to_proc trampoline has only the raw sp_int register args the proc
+   ABI hands it and cannot check each argument's Ruby class the way a typed
+   call site's sp_bm_legacy_abi_ok does, so a pointer-typed parameter would
+   take an Integer argument as a raw address and dereference it -- e.g.
+   `[obj.method(:str_method)][0].to_proc.call(1)` reached sp_str_length(1)
+   and segfaulted (#4395). Decline such signatures here. */
+static int sp_bm_sig_scalar_only(const char *sig, sp_int n) {
+  if (!sig) return 0;
+  for (sp_int k = 0; k < n; k++) {
+    sp_int code = 0;
+    for (int i = 0; i < 8; i++) code = code * 10 + (sig[8 * k + i] - '0');
+    if (code >= 100000) return 0;
+  }
+  return 1;
+}
 sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
   sp_BoundMethod *m = (sp_BoundMethod *)cap;
   if (!m || !m->fn) return 0;
+  /* A Method read out of a poly slot carries no call-site types, so this
+     generic trampoline may only forward to a target whose stamped legacy ABI
+     is callable at the exact fixed arity the C signature reads, and whose
+     parameters are all scalar. Any other target -- a rest/optional/keyword
+     parameter, a float/poly/by-value-struct parameter, a pointer-typed
+     parameter (this route cannot check the argument's class), an unbound
+     Method, or a mismatched argument count -- would take the sp_int register
+     as the wrong C type: the callee prologue roots a garbage rest pointer
+     (SP_GC_ROOT(lv_<rest>)) and the next collection dereferences it, or a
+     pointer parameter dereferences an Integer, a SIGSEGV (#4395). The typed
+     `.to_proc` path emits a per-signature trampoline and never reaches here,
+     so declining here only affects a Method that travelled through a poly
+     slot; raise the same NoMethodError the poly-call gate produces instead of
+     reading garbage. */
+  if (!m->legacy_int_abi || m->unbound || m->legacy_fixed > 16 || (m->legacy_ret == SP_BM_RET_POLY && m->legacy_fixed > 8) ||
+      (m->legacy_rest ? argc < m->legacy_fixed : argc != m->legacy_fixed) ||
+      !sp_bm_sig_scalar_only(m->legacy_sig, m->legacy_fixed))
+    sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
   /* A proc publishes its result through the boxed side-channel, which every
      generated proc body writes; this trampoline only returned it, so a caller
      reading the slot saw a stale value (#3692). The casts below already assume
      the target's sp_int ABI, so box the same answer. */
-  #define SP_BM_TRAMP_RET(EXPR) do { sp_int _r = (EXPR); _sp_proc_poly_ret = sp_box_int(_r); return _r; } while (0)
+  #define SP_BM_TRAMP_RET(EXPR) do { sp_int _r = sp_bm_norm_ret(m, (EXPR)); _sp_proc_poly_ret = sp_bm_box_ret(m, _r); return _r; } while (0)
+  /* A poly-returning target answers a 16-byte sp_RbVal in two registers that
+     no sp_int cast can read: take the sp_RbVal cast, publish the value in the
+     boxed slot and return 0, the way a generated poly-valued proc body does. */
+  #define SP_BM_TRAMP_POLY(EXPR) do { _sp_proc_poly_ret = (EXPR); return 0; } while (0)
+  if (m->legacy_ret == SP_BM_RET_POLY) {
+    if (!m->recv_bound) {
+      switch (argc) {
+        case 0: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void))(uintptr_t)m->fn)());
+        case 1: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int))(uintptr_t)m->fn)(args[0]));
+        case 2: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1]));
+        case 3: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2]));
+        case 4: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3]));
+        case 5: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4]));
+        case 6: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5]));
+        case 7: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6]));
+        default: SP_BM_TRAMP_POLY(((sp_RbVal (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]));
+      }
+    }
+    switch (argc) {
+      case 0: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *))(uintptr_t)m->fn)(m->self));
+      case 1: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int))(uintptr_t)m->fn)(m->self, args[0]));
+      case 2: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1]));
+      case 3: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2]));
+      case 4: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3]));
+      case 5: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4]));
+      case 6: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5]));
+      case 7: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6]));
+      default: SP_BM_TRAMP_POLY(((sp_RbVal (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]));
+    }
+  }
+  #undef SP_BM_TRAMP_POLY
+  /* A top-level method has no self parameter. The self-ful casts below would
+     put `m->self` (NULL) in the leading C slot, shifting every argument by
+     one -- `[method(:top_add)][0].to_proc.call(1, 2)` answered 1 instead of 3
+     (#4395). Select the cast by whether the Method carries a receiver, the
+     same way the emitted `.call`/`[]` arms do. */
+  if (!m->recv_bound) {
+    switch (argc) {
+      case 0: SP_BM_TRAMP_RET(((sp_int (*)(void))(uintptr_t)m->fn)());
+      case 1: SP_BM_TRAMP_RET(((sp_int (*)(sp_int))(uintptr_t)m->fn)(args[0]));
+      case 2: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1]));
+      case 3: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2]));
+      case 4: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3]));
+      case 5: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4]));
+      case 6: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5]));
+      case 7: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6]));
+      case 8: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]));
+      case 9: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]));
+      case 10: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9]));
+      case 11: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10]));
+      case 12: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11]));
+      case 13: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12]));
+      case 14: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13]));
+      case 15: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14]));
+      default: SP_BM_TRAMP_RET(((sp_int (*)(sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15]));
+    }
+  }
   switch (argc) {
     case 0: SP_BM_TRAMP_RET(((sp_int (*)(void *))(uintptr_t)m->fn)(m->self));
     case 1: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)(m->self, args[0]));
     case 2: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1]));
     case 3: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2]));
-    default: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3]));
+    case 4: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3]));
+    case 5: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4]));
+    case 6: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5]));
+    case 7: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6]));
+    case 8: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]));
+    case 9: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]));
+    case 10: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9]));
+    case 11: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10]));
+    case 12: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11]));
+    case 13: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12]));
+    case 14: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13]));
+    case 15: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14]));
+    default: SP_BM_TRAMP_RET(((sp_int (*)(void *, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int, sp_int))(uintptr_t)m->fn)(m->self, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11], args[12], args[13], args[14], args[15]));
   }
   #undef SP_BM_TRAMP_RET
 }

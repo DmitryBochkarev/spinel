@@ -4250,6 +4250,7 @@ static void sp_PolyArray_set(sp_PolyArray *a, sp_int i, sp_RbVal v) { if (!a) re
 static sp_PolyArray *sp_PolyArray_slice(sp_PolyArray *a, sp_int start, sp_int len) { SP_GC_ROOT(a); if (start < 0) start += a->len; if (start < 0) start = 0; sp_PolyArray *b = sp_PolyArray_new(); if (start >= a->len || len <= 0) return b; if (len > a->len - start) len = a->len - start; for (sp_int i = 0; i < len; i++) sp_PolyArray_push(b, a->data[start + i]); return b; }
 static sp_PolyArray *sp_PolyArray_slice_range(sp_PolyArray *a, sp_int start, sp_int end_, sp_int excl) { if (end_ < 0) end_ += a->len; if (start < 0) start += a->len; sp_int n = end_ - start + (excl ? 0 : 1); if (n < 0 || start < 0) n = 0; return sp_PolyArray_slice(a, start, n); }
 /* 2-arg slice on a poly receiver: dispatch to the typed slice functions. */
+static sp_RbVal sp_poly_callable_call(sp_RbVal v, sp_int n, const sp_int *args);
 static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
   if (a.tag == SP_TAG_STR) return sp_box_nullable_str(sp_str_sub_range(a.v.s ? a.v.s : "", start, len));
   /* A shared-string handle is a String: slicing is non-mutating, so it answers
@@ -4260,10 +4261,43 @@ static sp_RbVal sp_poly_slice(sp_RbVal a, sp_int start, sp_int len) {
   /* arr[start, negative] is nil in CRuby (the slice helpers would return []) */
   if (len < 0 && sp_poly_is_array_kind(a.cls_id)) return sp_box_nil();
   /* bm[a, b]: a boxed bound Method called with two int arguments (optcarrot's
-     store dispatch table: `@store[addr][addr, value]`). */
+     store dispatch table: `@store[addr][addr, value]`). The raw fn cast is
+     only valid for a target whose stamped per-position ABI accepts a scalar
+     at every fixed position (sp_bm_legacy_abi_ok); anything else (a
+     rest/optional/keyword signature, a float/poly/struct parameter, or a
+     pointer parameter the integer operands cannot fill) would read the wrong
+     C types, so route it through the callable helper, which raises CRuby's
+     NoMethodError instead of crashing (#4395). */
   if (a.cls_id == SP_BUILTIN_METHOD) {
     sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
-    return sp_box_int(((sp_int (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len));
+    /* The two operands are sp_int, so the target's fixed positions must be the
+       int token (or the TY_UNKNOWN wildcard), not some other scalar kind. */
+    if (sp_bm_legacy_abi_ok(m, 2, "0000000100000001")) {
+      /* A top-level method has no self; its C signature leads with the first
+         parameter, so the self-ful cast would shift both operands (#4395). A
+         poly return is an sp_RbVal in two registers, so it takes its own cast. */
+      if (m->legacy_ret == SP_BM_RET_POLY) {
+        if (m->recv_bound)
+          return ((sp_RbVal (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len);
+        return ((sp_RbVal (*)(sp_int, sp_int))(uintptr_t)m->fn)(start, len);
+      }
+      if (m->recv_bound)
+        return sp_bm_box_ret(m, ((sp_int (*)(void *, sp_int, sp_int))(uintptr_t)m->fn)((void *)m->self, start, len));
+      return sp_bm_box_ret(m, ((sp_int (*)(sp_int, sp_int))(uintptr_t)m->fn)(start, len));
+    }
+    sp_int slots[2]; slots[0] = start; slots[1] = len;
+    return sp_poly_callable_call(a, 2, slots);
+  }
+  /* Proc#[] is #call: a two-int slice on a callable is a two-argument call.
+     The emitter sends only statically-Integer operands here, so a boxed Proc
+     previously fell into the array switch and answered nil (#4395). */
+  if (a.v.p && (a.cls_id == SP_BUILTIN_PROC || a.cls_id == SP_BUILTIN_CURRY)) {
+    _sp_proc_poly_args[0] = sp_box_int(start);
+    _sp_proc_poly_args[1] = sp_box_int(len);
+    sp_int slots[16];
+    slots[0] = start;
+    slots[1] = len;
+    return sp_poly_callable_call(a, 2, slots);
   }
   switch (a.cls_id) {
     case SP_BUILTIN_INT_ARRAY:  return sp_box_int_array(sp_IntArray_slice((sp_IntArray*)a.v.p, start, len));
@@ -6946,6 +6980,15 @@ static SP_INLINE sp_RbVal sp_poly_arr_get_hash(sp_RbVal a, sp_int i) {
 }
 
 static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
+  /* Proc#[] is #call: an Integer index on a callable is a one-argument call.
+     The emitter's int-key read reaches this cold arm (a Proc is not an array
+     kind), so a boxed Proc used to answer nil (#4395). */
+  if (a.tag == SP_TAG_OBJ && a.v.p && a.cls_id == SP_BUILTIN_PROC) {
+    _sp_proc_poly_args[0] = sp_box_int(i);
+    sp_int slots[16];
+    slots[0] = i;
+    return sp_poly_callable_call(a, 1, slots);
+  }
   /* MatchData#[n] is the nth group, and a match stored in a container reaches
      the generic index path (#3641) */
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_MATCHDATA)
@@ -7004,10 +7047,26 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
      realizing once the accumulator reaches its count */
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_CURRY)
     return sp_curry_call_poly((sp_Curry *)a.v.p, 1, (sp_RbVal[]){sp_box_int(i)});
-  /* bm[arg]: a boxed bound Method called with the (single) int argument. */
+  /* bm[arg]: a boxed bound Method called with the (single) int argument. Like
+     the slice arm, the stamped per-position ABI must accept a scalar at every
+     fixed position (sp_bm_legacy_abi_ok); a rest/optional/keyword,
+     pointer, or float/poly/struct signature would read or be read as the
+     wrong C type, so hand it to the callable helper (NoMethodError) instead
+     (#4395). */
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_METHOD) {
     sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
-    return sp_box_int(((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i));
+    if (sp_bm_legacy_abi_ok(m, 1, "00000001")) {
+      if (m->legacy_ret == SP_BM_RET_POLY) {   /* an sp_RbVal return needs its own cast */
+        if (m->recv_bound)
+          return ((sp_RbVal (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i);
+        return ((sp_RbVal (*)(sp_int))(uintptr_t)m->fn)(i);
+      }
+      if (m->recv_bound)
+        return sp_bm_box_ret(m, ((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i));
+      return sp_bm_box_ret(m, ((sp_int (*)(sp_int))(uintptr_t)m->fn)(i));
+    }
+    sp_int slots[1]; slots[0] = i;
+    return sp_poly_callable_call(a, 1, slots);
   }
   return sp_poly_arr_get(a, i);
 }
@@ -7496,7 +7555,13 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
          and unbox the result rather than the legacy sp_int ABI. */
       return sp_poly_to_i(((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, sp_box_int(i)));
 #else
-      return ((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i);
+      if (sp_bm_legacy_abi_ok(m, 1, "00000001")) {
+        if (m->recv_bound)
+          return ((sp_int (*)(void *, sp_int))(uintptr_t)m->fn)((void *)m->self, i);
+        return ((sp_int (*)(sp_int))(uintptr_t)m->fn)(i);
+      }
+      sp_int slots[1]; slots[0] = i;
+      return sp_poly_to_i(sp_poly_callable_call(a, 1, slots));
 #endif
     }
     if (a.cls_id == SP_BUILTIN_INT_ARRAY) return sp_IntArray_get((sp_IntArray *)a.v.p, i);

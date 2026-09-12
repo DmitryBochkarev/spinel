@@ -7413,6 +7413,26 @@ static void emit_rest_shortfall_raise(int given_tmp, int req) {
              given_tmp, req, req, given_tmp);
 }
 
+/* True when `m` is a synthesized receiverless Kernel wrapper
+   (`method(:puts)`) whose builtin takes a variable or optional count. The
+   wrapper declares a single __bam_r parameter, so it cannot express the
+   builtin's real arity and forwards only the first argument. A call with
+   extra arguments is truncated rather than raising ArgumentError, matching
+   the behavior before #4395; the UB fix (a zero-argument call reads an
+   undefined register) still raises on the shortfall. A receiver-bound wrapper
+   is excluded -- its __bam_r is the receiver, not an argument. */
+static int bam_variadic_kernel(const NodeTable *nt, const Scope *m) {
+  if (!m->name || strncmp(m->name, "__bam_", 6) != 0 || m->body < 0) return 0;
+  int bn = 0;
+  const int *bb = nt_arr(nt, m->body, "body", &bn);
+  if (bn < 1 || !bb || !nt_type(nt, bb[0]) || !sp_streq(nt_type(nt, bb[0]), "CallNode")) return 0;
+  if (nt_ref(nt, bb[0], "receiver") >= 0) return 0;   /* receiver-bound wrapper */
+  const char *nm = nt_str(nt, bb[0], "name");
+  if (!nm) return 0;
+  return sp_streq(nm, "puts") || sp_streq(nm, "print") || sp_streq(nm, "p") ||
+         sp_streq(nm, "pp") || sp_streq(nm, "Rational") || sp_streq(nm, "Complex");
+}
+
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   Scope *m = &c->scopes[callee_idx];
   const NodeTable *nt = c->nt;
@@ -7486,7 +7506,17 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
     }
     int synth = 0, nfixed = 0, nreq = 0;
     for (int i = 0; i < m->nparams; i++) {
-      if (m->pnames[i] && m->pnames[i][0] == '_' && m->pnames[i][1] == '_') { synth = 1; break; }
+      /* A __bam_ wrapper's parameters are REAL call arguments here: a
+         receiverless Kernel wrapper (`method(:String)`) has one, and only it
+         reaches this function -- a receiver-bound wrapper's Method call goes
+         through the object-bound path, whose self slot carries param[0].
+         Counting a receiverless wrapper's parameter as compiler plumbing
+         skipped the arity check, so `method(:String).call` invoked it with a
+         filled-in 0 instead of raising ArgumentError (and `method(:String)`
+         .call(123) still binds its argument normally). Every other
+         __-prefixed parameter is compiler plumbing, as before. */
+      if (m->pnames[i] && m->pnames[i][0] == '_' && m->pnames[i][1] == '_' &&
+          strncmp(m->pnames[i], "__bam_", 6) != 0) { synth = 1; break; }
       nfixed++;
       if (!m->pdefault || m->pdefault[i] < 0) nreq++;
     }
@@ -7516,7 +7546,7 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
       if (nreq == nfixed) snprintf(expbuf2, sizeof expbuf2, "%d", nfixed);
       else snprintf(expbuf2, sizeof expbuf2, "%d..%d", nreq, nfixed);
       int raised = 0;
-      if (eff_pos > nfixed) {
+      if (eff_pos > nfixed && !bam_variadic_kernel(nt, m)) {
         args_raise("wrong number of arguments (given %d, expected %s)", eff_pos, expbuf2);
         raised = 1;
       }
