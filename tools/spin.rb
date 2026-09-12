@@ -2524,12 +2524,23 @@ when "build", "run", "test", "clean"
     puts "cleaned"
   end
 when "--version"
-  # spin's own build first; then the compiler it would drive, which is the
-  # sibling binary when spin is installed beside it and otherwise the one on
-  # PATH, so the two lines can legitimately differ.
-  puts "spin #{SPIN_RELEASE} (#{SPIN_BUILD_REV})"
+  # spin and spinel ship together and normally carry one stamp, so one line
+  # in spinel's shape, with the C compiler the driven spinel reports:
+  #   spin 2026.09.12 (112bae85) [gcc 13.3.0 (cc)]
+  # The spinel spin drives is the sibling binary when spin is installed
+  # beside one and otherwise the one on PATH, so it CAN be another build;
+  # only then is it named, on a second line.
+  mine = "spin #{SPIN_RELEASE} (#{SPIN_BUILD_REV})"
   sv = sh_read(spinel_bin + " --version").strip
-  puts sv if sv != ""
+  f = sv.split(" ")
+  same = f.length >= 3 && f[1] == SPIN_RELEASE && f[2] == "(#{SPIN_BUILD_REV})"
+  cc = sv.index("[") ? sv[sv.index("[")..-1] : ""
+  if same
+    puts cc == "" ? mine : mine + " " + cc
+  else
+    puts mine
+    puts "driving " + sv if sv != ""
+  end
 else
   puts SPIN_USAGE
   exit(cmd == "" || cmd == "help" || cmd == "--help" ? 0 : 3)
