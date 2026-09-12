@@ -4286,14 +4286,17 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
   if (sp_streq(name, "to_proc") && argc == 0) {
     int tv = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-    buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
+    /* The constructor allocates: root the source Method in the temp or a
+       fresh receiver (`pick.to_proc`) is swept mid-call and the Proc's
+       capture dangles. Same shape as the concrete-`TY_METHOD` fallback. */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
                   " ? _t%d"
                   /* a Method read out of a container wraps into a Proc, as the
                      typed receiver's #to_proc does (#3692) */
                   " : _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
                   " ? sp_box_obj(sp_method_to_proc((sp_BoundMethod *)_t%d.v.p), SP_BUILTIN_PROC)"
                   " : (sp_raise_nomethod(sp_nomethod_msg(\"to_proc\", _t%d)), sp_box_nil()); })",
-               tv, tv, tv, tv, tv, tv, tv);
+               tv, tv, tv, tv, tv, tv, tv, tv);
     return 1;
   }
   /* Method#unbind on a value read out of a container: the same target with the
@@ -4301,23 +4304,27 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
   if (sp_streq(name, "unbind") && argc == 0) {
     int tv = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-    buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
+    /* sp_bm_unbind allocates and then reads m->desc/legacy_* off the source;
+       root the temp so a fresh receiver cannot be swept mid-call. */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
                   " ? sp_box_obj(sp_bm_unbind((sp_BoundMethod *)_t%d.v.p), SP_BUILTIN_METHOD)"
                   " : (sp_raise_nomethod(sp_nomethod_msg(\"unbind\", _t%d)), sp_box_nil()); })",
-               tv, tv, tv, tv);
+               tv, tv, tv, tv, tv);
     return 1;
   }
   if (sp_streq(name, "parameters") && argc == 0) {
     int tv = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-    buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
+    /* Both helpers allocate before reading the receiver's desc/fields; root
+       the temp so a fresh receiver cannot be swept mid-call. */
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
                   " ? sp_proc_parameters_ids((sp_Proc *)_t%d.v.p, -1, (sp_sym)%d, (sp_sym)%d)"
                   /* a Method read out of a container answers from its own
                      rendering, which carries the parameter list (#3692) */
                   " : _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_METHOD"
                   " ? sp_bm_parameters((sp_BoundMethod *)_t%d.v.p)"
                   " : (sp_PolyArray *)(sp_raise_nomethod(sp_nomethod_msg(\"parameters\", _t%d)), (void *)0); })",
-               tv, tv, tv, comp_sym_intern(c, "req"), comp_sym_intern(c, "opt"), tv, tv, tv, tv);
+               tv, tv, tv, tv, comp_sym_intern(c, "req"), comp_sym_intern(c, "opt"), tv, tv, tv, tv);
     return 1;
   }
   if (sp_streq(name, "curry") && argc == 0) {
@@ -4925,7 +4932,11 @@ static int emit_poly_callable_prearm(Compiler *c, const char *name, int argc,
      by the stamped kind, and the sp_RbVal one for a poly-returning target,
      whose struct return no sp_int cast can read; the Method's stamp picks at
      run time. Under promote every target returns sp_RbVal already. */
-  buf_printf(&eb, "(_t%d.cls_id == SP_BUILTIN_METHOD ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", tv, tv);
+  /* A Method that resolved no target (`self.class.method(:m)`, a class value
+     that is not a statically-known constant) carries a NULL fn. Under promote
+     there is no sp_bm_legacy_abi_ok gate, so the cast below would jump through
+     NULL; test fn here and fall to sp_poly_callable_call's NoMethodError. */
+  buf_printf(&eb, "(_t%d.cls_id == SP_BUILTIN_METHOD && ((sp_BoundMethod *)_t%d.v.p)->fn ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", tv, tv, tv);
   for (int pass = 0; pass < (mabi_poly ? 1 : 2); pass++) {
     const char *rty = (pass == 0) ? aty : "sp_RbVal";
     const char *bo = (pass == 0) ? boxopen : "";
@@ -17408,7 +17419,10 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       if (mabi_poly) boxopen[0] = 0;
       else snprintf(boxopen, sizeof boxopen, "sp_bm_box_ret((sp_BoundMethod *)_t%d.v.p, ", t);
       if (mabi_poly)
-        buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", t, t);
+        /* A NULL-fn Method (an unresolved class value) has no callable
+           address; test fn so it falls to sp_poly_callable_call's
+           NoMethodError instead of jumping through NULL. */
+        buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD && ((sp_BoundMethod *)_t%d.v.p)->fn ? (((sp_BoundMethod *)_t%d.v.p)->recv_bound ? ", t, t, t);
       else {
         buf_printf(b, "(_t%d.cls_id == SP_BUILTIN_METHOD && ", t);
         if (method_ok) emit_bm_legacy_ok(b, t, argc, method_sig);
@@ -17586,8 +17600,11 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       int tvp = ++g_tmp;
       buf_printf(b, "({ sp_BoundMethod *_t%d = ", tvp);
       emit_expr(c, recv, b);
+      /* The new constructor allocates: root the source Method so its self
+         (loaded as the new self below) cannot be swept mid-call. */
+      buf_printf(b, "; SP_GC_ROOT(_t%d); ", tvp);
       int sup_unb = method_expr_is_unbound(c, recv);
-      buf_printf(b, "; %ssp_bm_set_abi(sp_bound_method_new_d(_t%d->self, _t%d->self_kind, (sp_int)(uintptr_t)&", sup_unb ? "sp_bm_set_unbound(" : "", tvp, tvp);
+      buf_printf(b, "%ssp_bm_set_abi(sp_bound_method_new_d(_t%d->self, _t%d->self_kind, (sp_int)(uintptr_t)&", sup_unb ? "sp_bm_set_unbound(" : "", tvp, tvp);
       emit_method_cname(c, &c->scopes[pmip], b);
       buf_puts(b, ", ");
       emit_str_literal(b, c->scopes[pmip].name ? c->scopes[pmip].name : "?");
@@ -17654,9 +17671,13 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     int mn2 = method_recv_node(c, recv);
     int t2 = mn2 >= 0 ? method_obj_target_mi(c, mn2) : -1;
     if (t2 >= 0 && ty_is_object(comp_ntype(c, argv[0]))) {
-      buf_puts(b, "sp_bm_set_abi(sp_bound_method_new_d((void *)(");
+      /* The constructor allocates: hold the fresh `obj` (`...bind(C.new)`)
+         in a rooted C temporary across it, or the only reference can be
+         swept. Same shape as the `.method` and `.to_proc` captures. */
+      int bt = ++g_tmp;
+      buf_printf(b, "({ void *_t%d = (void *)(", bt);
       emit_expr(c, argv[0], b);
-      buf_puts(b, "), SP_BM_SELF_OBJ, (sp_int)(uintptr_t)&");
+      buf_printf(b, "); SP_GC_ROOT(_t%d); sp_bm_set_abi(sp_bound_method_new_d(_t%d, SP_BM_SELF_OBJ, (sp_int)(uintptr_t)&", bt, bt);
       emit_method_cname(c, &c->scopes[t2], b);
       buf_puts(b, ", ");
       emit_str_literal(b, method_sym_arg(c, mn2));
@@ -17667,6 +17688,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       { char _s[8 * 64 + 1]; int _fx = 0, _rs = 0, _rt = 0;
         int _ab = method_legacy_int_abi(c, t2, 1, _s, sizeof _s, &_fx, &_rs, &_rt);
         emit_bm_abi_args(b, "1", _ab, _s, _fx, _rs, _rt); }
+      buf_puts(b, "; })");
       return;
     }
   }
@@ -17722,19 +17744,33 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     int bop_ret = 0;    /* SP_BM_RET_INT */
     int bop_is_adapter = 0;  /* target is a synthesized typed-array adapter */
     char bop_sig[8 * 64 + 1]; bop_sig[0] = 0;  /* typed-array adapter ABI signature */
-    buf_puts(b, mi >= 0 ? "sp_bm_set_abi(sp_bound_method_new_d(" : "sp_bm_set_abi(sp_bound_method_new(");
     /* A Method bound to a class/module (Klass.method(:cmeth)) has no instance
        self -- the class value is not a heap pointer, so pass NULL. */
     const char *self_kind = "SP_BM_SELF_NONE";
-    if (recv >= 0 && comp_ntype(c, recv) == TY_CLASS) buf_puts(b, "NULL");
-    else if (recv >= 0) {
+    int self_is_str = 0, self_rooted = 0;
+    int self_receiver = (recv >= 0 && comp_ntype(c, recv) != TY_CLASS);
+    int self_tmp = 0;
+    if (self_receiver) {
       TyKind rt2 = comp_ntype(c, recv);
       /* A Method binds to whatever the receiver is, and a number is not a
          reference the collector can follow. */
-      if (rt2 == TY_STRING || rt2 == TY_STRBUF) self_kind = "SP_BM_SELF_STR";
-      else if (needs_root(rt2) && rt2 != TY_POLY && !comp_ty_value_obj(c, rt2)) self_kind = "SP_BM_SELF_OBJ";
-      buf_puts(b, "(void *)("); emit_expr(c, recv, b); buf_puts(b, ")");
+      if (rt2 == TY_STRING || rt2 == TY_STRBUF) { self_kind = "SP_BM_SELF_STR"; self_is_str = 1; self_rooted = 1; }
+      else if (needs_root(rt2) && rt2 != TY_POLY && !comp_ty_value_obj(c, rt2)) { self_kind = "SP_BM_SELF_OBJ"; self_rooted = 1; }
+      /* The constructor allocates and may collect: a fresh receiver
+         (`M.new.method(:v)`) is otherwise unreachable and would be swept, so
+         hold it in a rooted C temporary across the call -- the same shape as
+         the `.to_proc` capture below. */
+      if (self_rooted) {
+        self_tmp = ++g_tmp;
+        buf_printf(b, "({ void *_t%d = (void *)(", self_tmp);
+        emit_expr(c, recv, b);
+        buf_printf(b, "); SP_GC_ROOT%s(_t%d); ", self_is_str ? "_STR" : "", self_tmp);
+      }
     }
+    buf_puts(b, mi >= 0 ? "sp_bm_set_abi(sp_bound_method_new_d(" : "sp_bm_set_abi(sp_bound_method_new(");
+    if (self_rooted) buf_printf(b, "_t%d", self_tmp);
+    else if (recv >= 0 && comp_ntype(c, recv) == TY_CLASS) buf_puts(b, "NULL");
+    else if (recv >= 0) { buf_puts(b, "(void *)("); emit_expr(c, recv, b); buf_puts(b, ")"); }
     else if (self_bound) { buf_printf(b, "(void *)%s", g_self); self_kind = "SP_BM_SELF_OBJ"; }
     else buf_puts(b, "NULL");
     buf_printf(b, ", %s, ", self_kind);
@@ -17891,6 +17927,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       emit_bm_abi_args(b, _rbb, mi_legacy, mi >= 0 ? mi_sig : bop_sig,
                        mi >= 0 ? mi_fixed : bop_argc, mi >= 0 ? mi_rest : bop_rest,
                        mi >= 0 ? mi_ret : bop_ret); }
+    if (self_rooted) buf_puts(b, "; })");
     return;
   }
   /* <method>.to_proc wraps the bound method in a trampoline Proc. When the
@@ -18292,9 +18329,15 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
                    tid, tcap, m_arity); }
       return;
     }
-    buf_puts(b, "sp_method_to_proc(");
-    emit_expr(c, recv, b);
-    buf_puts(b, ")");
+    /* sp_method_to_proc allocates the proc and stores the Method as its
+       capture; a fresh receiver Method (`self.class.method(:m).to_proc`) is
+       otherwise unreachable and would be swept mid-allocation, leaving the
+       proc's capture dangling. Root it across the constructor, the same shape
+       as the per-site path above. */
+    { int tp = ++g_tmp;
+      buf_printf(b, "({ sp_BoundMethod *_t%d = ", tp);
+      emit_expr(c, recv, b);
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_method_to_proc(_t%d); })", tp, tp); }
     return;
   }
   /* <method>.name -> the stored method name, interned to a Symbol (CRuby
@@ -18904,6 +18947,14 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       }
     }
     buf_printf(b, "({ sp_BoundMethod *_t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+    /* An unresolved target (`self.class.method(:m)`, any class value that is
+       not a statically-known constant) binds with a NULL fn -- there is no
+       callable address. Invoking it jumped through NULL; the poly-slot and
+       first-class routes decline with NoMethodError, so decline the same way
+       here instead of dereferencing it. */
+    buf_printf(b, "if (!_t%d->fn) sp_raise_cls(\"NoMethodError\","
+                  " sp_sprintf(\"undefined method '%%s' for an instance of Object\","
+                  " _t%d->name ? _t%d->name : \"?\")); ", tr, tr, tr);
     /* This statement expression evaluates the callee's defaults (and any
        inlined blocks they contain), which bind the METHOD scope's locals; the
        callee's own prologue does not run in this frame, so declare them here. */

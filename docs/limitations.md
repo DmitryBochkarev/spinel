@@ -176,12 +176,18 @@ no keyword channel. A target that declares a required keyword parameter
 declines the whole `to_proc` with `NoMethodError`; a target with only OPTIONAL
 keywords still applies them on a keyword-less call (`def kw(a, b = a + 1,
 c: 3); m.to_proc.call(1)` answers `[1, 2, 3]`), but a call that actually
-passes a trailing keyword hash declines at run time with `NoMethodError`
-rather than binding the hash to the next positional parameter's C slot
-(`m.to_proc.call(1, c: 9)` used to answer `[1, <hash>, 3]`). An explicit
-braced positional `Hash` in that trailing position is indistinguishable at the
-proc ABI and declines the same way (`m.to_proc.call({c: 9})`). Call the Method
-directly (`m.call(1, c: 9)`) for keyword arguments.
+passes a trailing keyword hash declines at run time rather than binding the
+hash to the next positional parameter's C slot (`m.to_proc.call(1, c: 9)` used
+to answer `[1, <hash>, 3]`). The class depends on whether the target has a
+spare optional positional slot: with one (`def kw(a, b = a + 1, c: 3)`) the
+hash lands in that slot and the keyword guard raises `NoMethodError`, while
+without one (`def m(a, c: 3)`) the earlier positional count guard fires and
+raises `ArgumentError: wrong number of arguments (given 2, expected 1)`.
+Either way it is an exception and never a positional read of the hash. An
+explicit braced positional `Hash` in that trailing position is
+indistinguishable at the proc ABI and declines the same way
+(`m.to_proc.call({c: 9})`). Call the Method directly (`m.call(1, c: 9)`) for
+keyword arguments.
 
 Required-keyword presence is not enforced through a receiver-bound
 `Method#call`. With `class K; def m(a, c:); [a, c]; end;

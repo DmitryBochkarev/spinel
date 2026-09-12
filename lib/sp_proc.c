@@ -139,7 +139,10 @@ static int sp_bm_sig_scalar_only(const char *sig, sp_int n) {
 }
 sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
   sp_BoundMethod *m = (sp_BoundMethod *)cap;
-  if (!m || !m->fn) return 0;
+  /* A bind site that could not resolve a target (`self.class.method(:m)`) has
+     no callable address; dereferencing the NULL fn here segfaulted. Decline
+     with the same NoMethodError a resolved-but-incompatible target gets. */
+  if (!m || !m->fn) sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");
   /* A Method read out of a poly slot carries no call-site types, so this
      generic trampoline may only forward to a target whose stamped legacy ABI
      is callable at the exact fixed arity the C signature reads, and whose

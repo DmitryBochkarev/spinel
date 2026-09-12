@@ -7573,7 +7573,13 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
       sp_BoundMethod *m = (sp_BoundMethod *)a.v.p;
 #ifdef SP_INT_OVERFLOW_MODE_PROMOTE
       /* promote: methods are poly-signatured, so invoke through the poly ABI
-         and unbox the result rather than the legacy sp_int ABI. */
+         and unbox the result rather than the legacy sp_int ABI. A NULL-fn
+         Method (an unresolved class value) has no callable address; route it
+         through the callable helper's NoMethodError instead of NULL. */
+      if (!m->fn) {
+        sp_int slots[1]; slots[0] = i;
+        return sp_poly_to_i(sp_poly_callable_call(a, 1, slots));
+      }
       return sp_poly_to_i(((sp_RbVal (*)(void *, sp_RbVal))(uintptr_t)m->fn)((void *)m->self, sp_box_int(i)));
 #else
       if (sp_bm_legacy_abi_ok(m, 1, "00000001")) {

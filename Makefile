@@ -1132,7 +1132,8 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_thread_tls_first_write.rb \
                   test/proc_cell_capture_marked.rb \
                   test/gc_minor_byref_lent_slot.rb \
-                  test/gc_minor_barrier_holders.rb
+                  test/gc_minor_barrier_holders.rb \
+                  test/bound_method_fresh_receiver.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every
