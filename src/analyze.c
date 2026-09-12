@@ -7334,6 +7334,16 @@ static int narrow_object_arrays(Compiler *c) {
     }
   }
   if (n == 0) { free(sl); return 0; }
+  /* (class, ivar) -> slot + 1, so a read costs one ivar-name lookup in its
+     own class rather than a scan of every slot: the scan was O(nodes x
+     slots) per round and took a 100k-line program from seconds to minutes. */
+  int **ivslot = (int **)calloc((size_t)(c->nclasses ? c->nclasses : 1), sizeof(int *));
+  for (int i = 0; i < n; i++) {
+    if (sl[i].ici < 0) continue;
+    if (!ivslot[sl[i].ici]) ivslot[sl[i].ici] = (int *)calloc((size_t)c->classes[sl[i].ici].nivars, sizeof(int));
+    ivslot[sl[i].ici][sl[i].iiv] = i + 1;
+  }
+  #define OA_IVSLOT(ci, ivn) ({ int _r = -1; if ((ci) >= 0 && (ci) < c->nclasses && ivslot[ci]) { int _iv = comp_ivar_index(&c->classes[ci], (ivn)); if (_iv >= 0) _r = ivslot[ci][_iv] - 1; } _r; })
   int nc = nt->count ? nt->count : 1;
   int *read_slot = (int *)malloc(sizeof(int) * nc);
   /* call_ret[id]: the return slot this CallNode's value comes from, or -1. */
@@ -7379,19 +7389,16 @@ static int narrow_object_arrays(Compiler *c) {
       continue;
     }
     if (sp_streq(ty, "InstanceVariableReadNode")) {
+      /* a candidate class has no subclass and no ancestor declaring the
+         ivar, so the only other reader of this slot is a singleton method
+         of the class itself (a class-level ivar of the same name) */
       const char *nm = nt_str(nt, id, "name");
       Scope *sc = comp_scope_of(c, id);
       if (!nm || !sc) continue;
-      for (int i = 0; i < n; i++) {
-        if (sl[i].ici < 0 || !sp_streq(c->classes[sl[i].ici].ivars[sl[i].iiv], nm)) continue;
-        if (sc->class_id == sl[i].ici && !sc->is_cmethod) read_slot[id] = i;
-        else if (sc->class_id >= 0 && sc->class_id != sl[i].ici) {
-          int related = 0;
-          for (int k = sc->class_id; k >= 0; k = c->classes[k].parent) if (k == sl[i].ici) { related = 1; break; }
-          if (related) sl[i].alive = 0;
-        }
-        else sl[i].alive = 0;
-      }
+      int i = OA_IVSLOT(sc->class_id, nm);
+      if (i < 0) continue;
+      if (sc->is_cmethod) sl[i].alive = 0;
+      else read_slot[id] = i;
       continue;
     }
     if (sp_streq(ty, "CallNode")) {
@@ -7403,16 +7410,14 @@ static int narrow_object_arrays(Compiler *c) {
       int rci = -1;
       if (recv >= 0) { TyKind rt = infer_type(c, recv); if (ty_is_object(rt)) rci = ty_object_class(rt); }
       else { Scope *sc = comp_scope_of(c, id); if (sc && !sc->is_cmethod) rci = sc->class_id; }
-      if (rci < 0) continue;
-      for (int i = 0; i < n; i++) {
-        if (sl[i].ici != rci) continue;
-        const char *ivn = c->classes[rci].ivars[sl[i].iiv];
-        if (!sp_streq(ivn + 1, nm)) continue;
-        /* the synthesized attr_reader only: an explicit `def x; @x; end` is a
-           method with a return slot, reached through call_ret in step 4 */
-        if (comp_is_reader(&c->classes[rci], nm) && comp_method_in_chain(c, rci, nm, NULL) < 0)
-          read_slot[id] = i;
-      }
+      if (rci < 0 || !ivslot[rci] || !comp_is_reader(&c->classes[rci], nm)) continue;
+      char ivn[300];
+      if (strlen(nm) >= sizeof ivn - 1) continue;
+      ivn[0] = '@'; strcpy(ivn + 1, nm);
+      int i = OA_IVSLOT(rci, ivn);
+      /* the synthesized attr_reader only: an explicit `def x; @x; end` is a
+         method with a return slot, reached through call_ret in step 4 */
+      if (i >= 0 && comp_method_in_chain(c, rci, nm, NULL) < 0) read_slot[id] = i;
     }
   }
 
@@ -7589,17 +7594,10 @@ static int narrow_object_arrays(Compiler *c) {
     const char *nm = nt_str(nt, id, "name");
     Scope *sc = comp_scope_of(c, id);
     if (!nm || !sc) continue;
-    for (int i = 0; i < n; i++) {
-      if (sl[i].ici < 0 || !sp_streq(c->classes[sl[i].ici].ivars[sl[i].iiv], nm)) continue;
-      if (sc->class_id == sl[i].ici && !sc->is_cmethod)
-        oa_classify_value(c, sl, n, read_slot, call_ret, claimed, i, nt_ref(nt, id, "value"));
-      else if (sc->class_id < 0) sl[i].alive = 0;
-      else {
-        int related = 0;
-        for (int k = sc->class_id; k >= 0; k = c->classes[k].parent) if (k == sl[i].ici) { related = 1; break; }
-        if (related || sc->is_cmethod) sl[i].alive = 0;
-      }
-    }
+    int i = OA_IVSLOT(sc->class_id, nm);
+    if (i < 0) continue;
+    if (sc->is_cmethod) sl[i].alive = 0;
+    else oa_classify_value(c, sl, n, read_slot, call_ret, claimed, i, nt_ref(nt, id, "value"));
   }
 
   /* 5b. a return slot's own value: the method's tail expression and every
@@ -7738,6 +7736,9 @@ static int narrow_object_arrays(Compiler *c) {
     if (now != sl[i].old_pin) { changed = 1; break; }
   }
 
+  for (int k = 0; k < c->nclasses; k++) free(ivslot[k]);
+  free(ivslot);
+  #undef OA_IVSLOT
   free(sl); free(read_slot); free(call_ret); free(claimed); free(value_ok); free(attr_sym);
   return changed;
 }
