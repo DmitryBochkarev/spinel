@@ -1975,10 +1975,12 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     int mn = method_recv_node(c, recv);
     int mi = mn >= 0 ? method_obj_target_mi(c, mn) : -1;
     if (mi >= 0) return c->scopes[mi].ret == TY_UNKNOWN ? TY_INT : c->scopes[mi].ret;
-    /* Unresolved target: the bound-method ABI returns sp_int -- except under
-       promote, where every method is poly-signatured and bound methods are
-       invoked through the poly ABI (sp_RbVal), so the call yields poly. */
-    return g_promote_mode ? TY_POLY : TY_INT;
+    /* Unresolved target (a Method that arrived through a parameter or a
+       slot): the value is whatever the target answers, boxed by the return
+       kind its bind site stamped, so the call yields poly (#4445). Reading
+       the raw sp_int as an Integer answered a String's pointer. Under
+       promote it was always poly: every method is poly-signatured there. */
+    return TY_POLY;
   }
   if (recv >= 0 && rt == TY_METHOD && argc == 0 && sp_streq(name, "to_proc")) return TY_PROC;
   /* A Method read out of a container answers these from its sp_BoundMethod;

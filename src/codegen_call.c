@@ -4686,7 +4686,11 @@ static int method_legacy_int_abi(Compiler *c, int mi, int recv_bound, char *out_
      so sp_bm_box_ret's String kind boxes it correctly. Allow only the
      wrapper shape, where spinel owns the ABI. */
   if (m->ret == TY_INT) { if (out_ret) *out_ret = 0; /* SP_BM_RET_INT */ }
-  else if (m->ret == TY_STRING && is_bam) { if (out_ret) *out_ret = 1; /* SP_BM_RET_STR */ }
+  /* A String return is a `const char *` in the register, for a regular
+     method as much as for a wrapper that launders one: the kind boxes it.
+     Declining it left `resolver.call` on a String-returning target with no
+     stamp, and the typed-receiver call then raised (#4445). */
+  else if (m->ret == TY_STRING) { if (out_ret) *out_ret = 1; /* SP_BM_RET_STR */ }
   /* A method whose value is nil (a void C function) is called for its effect
      and answers nil: the store-table callbacks of optcarrot's CPU are these
      (`def poke_ram(addr, data) ... end`), read out of a poly array and called
@@ -18193,10 +18197,32 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
     /* A top-level def has a self-less C ABI (fn(args)); an object-bound method
        is fn(self, args). The bound method carries a NULL self for the former. */
   bm_emit_call:
+    /* An unresolved target (a Method that arrived through a parameter or a
+       slot) has no static return type: the bind site stamped the kind of its
+       C return, and the call reads it the way the poly-slot arms do -- the
+       sp_RbVal cast for a poly-returning target, the sp_int cast boxed by
+       sp_bm_box_ret for every other -- so the value is a boxed poly rather
+       than the raw register read as an Integer (a String answered its
+       pointer, a poly two registers of garbage, #4445). The argument classes
+       are checked against the stamp too when the call site can spell them;
+       a target that cannot ride the cast raises the same NoMethodError the
+       poly-slot call does instead of reading garbage. */
+    int bm_dyn = !tm && !poly_abi;
+    char bm_sig[8 * 64 + 1]; bm_sig[0] = 0;
+    int bm_sig_ok = bm_dyn && splat_at2 < 0 && call_arg_sig(c, argv, eargc, bm_sig, sizeof bm_sig);
+    if (bm_dyn) {
+      if (bm_sig_ok) buf_printf(b, "!sp_bm_legacy_abi_ok(_t%d, %d, \"%s\") ? (sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_obj(_t%d, SP_BUILTIN_METHOD))), sp_box_nil()) : ", tr, eargc, bm_sig, name, tr);
+      buf_printf(b, "_t%d->legacy_ret == SP_BM_RET_POLY ? (", tr);
+    }
+    for (int pass = 0; pass < (bm_dyn ? 2 : 1); pass++) {
+    if (pass == 1) buf_printf(b, ") : sp_bm_box_ret(_t%d, ", tr);
     buf_printf(b, "_t%d->recv_bound ? ", tr);
     for (int arm = 0; arm < 2; arm++) {
       if (arm) buf_puts(b, " : ");
-      buf_puts(b, "(("); emit_ctype(c, tret, b); buf_puts(b, " (*)(");
+      buf_puts(b, "((");
+      if (bm_dyn) buf_puts(b, pass == 0 ? "sp_RbVal" : "sp_int");
+      else emit_ctype(c, tret, b);
+      buf_puts(b, " (*)(");
       if (arm == 0) buf_puts(b, "void *");
       for (int k = 0; k < eargc; k++) {
         if (arm == 0 || k) buf_puts(b, ", ");
@@ -18215,6 +18241,8 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
         buf_printf(b, "_t%d", atmp[k]);
       }
       buf_puts(b, ")");
+    }
+    if (pass == 1) buf_puts(b, ")");
     }
     buf_puts(b, "; })");
     free(atmp);
