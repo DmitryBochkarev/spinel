@@ -4844,8 +4844,10 @@ static void emit_bm_abi_args(Buf *b, const char *rb, int abi, const char *sig, i
    and `[]` (Proc#[] IS #call). Positional only: a keyword split (kwh >= 0)
    has arguments already matched against a specific user candidate and keeps
    falling through to the user arms, and a splatted argument is left to the
-   pre-existing (unsupported) dispatch path rather than published as one
-   argument. Emits
+   pre-existing (unsupported) dispatch path here rather than published as one
+   argument -- the fast path with no user `call` spreads a splat through
+   sp_poly_callable_spread, but this pre-arm's positional publish sequence has
+   no way to spread an array into per-position slots. Emits
    `if (<tag/cls is callable>) { <tr> = <expr>; }\nelse ` and returns 1 when
    emitted, 0 (nothing written) otherwise. */
 static int emit_poly_callable_prearm(Compiler *c, const char *name, int argc,
@@ -16869,8 +16871,9 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
       const char *aty = mabi_poly ? "sp_RbVal" : "sp_int";
       /* A splat among the arguments makes the arg count dynamic: build the full
          (boxed) argument array and spread it, as the statically-typed Proc path
-         does. The poly value is a Proc here (a boxed Method with a splat call is
-         not covered) (#3178). */
+         does. The poly value may be a Proc, a Curry, or a bound Method, so the
+         spread dispatches on the value's class (sp_poly_callable_spread): reading
+         it as an sp_Proc made a Method call segfault (#3178, #4395). */
       {
         int any_splat_pc = 0;
         for (int k = 0; k < argc; k++)
@@ -16900,7 +16903,7 @@ static void emit_call_body(Compiler *c, int id, Buf *b) {
             }
             free(ab.p);
           }
-          buf_printf(b, "((void)sp_proc_call_spread((sp_Proc *)_t%d.v.p, sp_box_poly_array(_t%d)), _sp_proc_poly_ret)", t, ta);
+          buf_printf(b, "sp_poly_callable_spread(_t%d, sp_box_poly_array(_t%d))", t, ta);
           return;
         }
       }

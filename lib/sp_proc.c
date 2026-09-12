@@ -146,7 +146,8 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      parameters are all scalar. Any other target -- a rest/optional/keyword
      parameter, a float/poly/by-value-struct parameter, a pointer-typed
      parameter (this route cannot check the argument's class), an unbound
-     Method, or a mismatched argument count -- would take the sp_int register
+     Method, or a mismatched argument count (the 16-slot proc ABI caps the
+     count whatever legacy_fixed says) -- would take the sp_int register
      as the wrong C type: the callee prologue roots a garbage rest pointer
      (SP_GC_ROOT(lv_<rest>)) and the next collection dereferences it, or a
      pointer parameter dereferences an Integer, a SIGSEGV (#4395). The typed
@@ -154,7 +155,7 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      so declining here only affects a Method that travelled through a poly
      slot; raise the same NoMethodError the poly-call gate produces instead of
      reading garbage. */
-  if (!m->legacy_int_abi || m->unbound || m->legacy_fixed > 16 || (m->legacy_ret == SP_BM_RET_POLY && m->legacy_fixed > 8) ||
+  if (!m->legacy_int_abi || m->unbound || argc > 16 || m->legacy_fixed > 16 || (m->legacy_ret == SP_BM_RET_POLY && m->legacy_fixed > 8) ||
       (m->legacy_rest ? argc < m->legacy_fixed : argc != m->legacy_fixed) ||
       !sp_bm_sig_scalar_only(m->legacy_sig, m->legacy_fixed))
     sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");

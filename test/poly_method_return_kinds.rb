@@ -9,13 +9,16 @@
 # is boxed by the String kind too, and a Bigint return is a nullable
 # `sp_Bigint *` riding the register. The typed-array adapter's statically
 # dispatched `.call` handed the raw sp_int register back as an Integer instead
-# of casting it to the array/string it really is, and its `.arity` was nil.
+# of casting it to the array/string it really is, and its `.arity` was nil. A
+# splatted call on a bound Method in a poly slot read the Method as an sp_Proc
+# and segfaulted; the spread now dispatches on the value's class.
 #
 # Every printed line is CRuby-equal; the snapshot comes from reference Ruby.
 
 class Ret
   def str(a) = a > 0 ? "pos" : "neg"
   def nul = nil
+  def sum2(a, b) = a + b
 end
 
 # String return through the poly `.call`/`[]` paths and the generic trampoline
@@ -82,3 +85,15 @@ puts sa.method(:[]).arity
 pslot = [sa.method(:push)]
 puts pslot[0].call("w").inspect
 puts pslot[0].arity.inspect
+
+# splat on a bound Method in a poly slot: the argument count is only known at
+# run time, so the spread dispatches on the value's class (a Method through
+# the generic trampoline, not cast to an sp_Proc)
+def top_add2(a, b) = a + b
+r2 = Ret.new
+tslot = [r2.method(:sum2), method(:top_add2)]
+argsv = [1, 2]
+puts tslot[0].call(*argsv)
+puts tslot[1].call(*argsv)
+puts tslot[0][*argsv]
+puts tslot[1].to_proc.call(*argsv)

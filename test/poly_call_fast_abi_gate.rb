@@ -147,3 +147,14 @@ class Table
   def run(i, j) = @ops[i][j]
 end
 puts Table.new.run(0, 5)
+
+# A splatted Method call wider than the 16-slot proc ABI declines rather than
+# truncating to the first 16 arguments: the spread helper has no register for
+# the surplus, and CRuby itself raises ArgumentError for the identical count.
+class Wide
+  def m16(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16)
+    a1 + a16
+  end
+end
+wide_args = (1..20).to_a
+expect_nome("splat_over") { [Wide.new.method(:m16)][0].call(*wide_args) }

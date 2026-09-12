@@ -33,3 +33,4 @@ adapter_arity: -1
 3
 6
 6
+splat_over: NoMethodError
