@@ -168,6 +168,29 @@ vendor/rbs/include/rbs/parser.h:
 	 rm -rf $$tmpdir /tmp/rbs-$(RBS_VERSION).gem
 	@test -f $@ && echo "rbs v$(RBS_VERSION) ready at vendor/rbs"
 
+# A source archive that builds with no network: the tree at HEAD as git sees
+# it, plus the two vendored parsers `make deps` would otherwise fetch from
+# rubygems.org (#4447). Named after the release the tree belongs to (the same
+# string `spinel --version` prints), so `make dist` at a release tag is the
+# release's own tarball; .github/workflows/release.yml attaches it to the
+# GitHub release when a tag is pushed. The recipient runs `make` -- `deps` is
+# already satisfied by the vendored sources -- and needs only a C compiler.
+DIST_RELEASE = $(shell git describe --tags --match '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]' \
+                 --match '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]*' 2>/dev/null \
+                 | sed -e 's/^$$/unreleased/' -e 's/-\([0-9][0-9]*\)-g[0-9a-f]*$$/+\1/')
+DIST_NAME = spinel-$(if $(DIST_RELEASE),$(DIST_RELEASE),unreleased)
+.PHONY: dist
+dist: deps
+	@mkdir -p build/dist
+	@rm -rf build/dist/$(DIST_NAME) build/dist/$(DIST_NAME).tar.xz
+	git archive --format=tar --prefix=$(DIST_NAME)/ HEAD | tar -xf - -C build/dist
+	@printf '%s\n%s\n' "$$(git rev-parse --short=12 HEAD)" "$(DIST_RELEASE)" > build/dist/$(DIST_NAME)/.spinel-dist
+	@mkdir -p build/dist/$(DIST_NAME)/vendor
+	cp -R vendor/prism vendor/rbs build/dist/$(DIST_NAME)/vendor/
+	tar -C build/dist -cJf build/dist/$(DIST_NAME).tar.xz $(DIST_NAME)
+	@rm -rf build/dist/$(DIST_NAME)
+	@ls -l build/dist/$(DIST_NAME).tar.xz
+
 # If PRISM_DIR ended up empty (no vendor/prism, no gem), halt with a clear
 # message before trying to build anything that needs it.
 ifeq ($(PRISM_DIR),)
@@ -234,10 +257,15 @@ build/csrc/%.o: src/%.c $(SPINEL_HDRS) | build/csrc
 # FIRST field of `spinel --version`: it is what identifies a build (two builds
 # of one release share a name and differ here), and tools/spin.rb reads that
 # field for the toolchain key its probe records are stored under.
+# A source archive from `make dist` carries no .git: it records the revision
+# and release it was cut from in .spinel-dist, and a build from it reads them
+# there so its `spinel --version` names the build it is.
 build/csrc/spinel_rev.h: FORCE | build/csrc
-	@r=$$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown); \
+	@r=$$(git rev-parse --short=12 HEAD 2>/dev/null); \
 	d=$$(git describe --tags --match '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]' \
 	       --match '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9]*' 2>/dev/null); \
+	if [ -z "$$r" ] && [ -f .spinel-dist ]; then r=$$(sed -n 1p .spinel-dist); d=$$(sed -n 2p .spinel-dist); fi; \
+	[ -n "$$r" ] || r=unknown; \
 	case "$$d" in \
 	  "") d=unreleased ;; \
 	  *-*-g*) d="$${d%-*-g*}+$$(echo "$$d" | sed 's/.*-\([0-9][0-9]*\)-g[0-9a-f]*$$/\1/')" ;; \
