@@ -1330,6 +1330,7 @@ const char *default_value(TyKind t) {
     case TY_COMPLEX: return "(sp_Complex){0}";
     case TY_RATIONAL: return "(sp_Rational){0}";
     case TY_MATCHDATA:  return "NULL";
+    case TY_BIGINT:     return "NULL";
     case TY_REGEX:      return "NULL";
     case TY_EXCEPTION: return "NULL";
     case TY_STRBUF:    return "NULL";

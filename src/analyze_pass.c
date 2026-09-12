@@ -3006,9 +3006,15 @@ int bind_call_params(Compiler *c, int call_id, int mi) {
     kwh = argv[argc - 1];
     pos_argc = argc - 1;
   }
-  /* Don't bind individual args to the *rest slot; it stays TY_POLY_ARRAY. */
+  /* Don't bind individual args to the *rest slot; it stays TY_POLY_ARRAY.
+     Neither does a positional argument reach a `**kwrest` slot: only a
+     keyword hash does (below). Binding one there mis-typed the kwrest as the
+     argument's scalar kind, and the bound-Method call site then emitted the
+     later keyword hash as that scalar (`sp_int = sp_SymPolyHash *`, a C build
+     failure) instead of routing it into the kwrest slot (#4395 follow-up). */
   int max_bind = m->nparams;
   if (m->rest_idx >= 0 && max_bind > m->rest_idx) max_bind = m->rest_idx;
+  if (m->kwrest_idx >= 0 && max_bind > m->kwrest_idx) max_bind = m->kwrest_idx;
   int n = pos_argc < max_bind ? pos_argc : max_bind;
   for (int k = 0; k < n; k++) {
     const char *apty = argv ? nt_type(nt, argv[k]) : NULL;

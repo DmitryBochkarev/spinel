@@ -6614,6 +6614,29 @@ else if (dty && sp_streq(dty, "NilNode")) {
     else buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value(pt));
   }
   else if (pt == TY_POLY) emit_boxed(c, dv, out);
+  /* A default expression typed poly landing in a concrete parameter slot: it
+     was typed in a scope whose class differs from the emitted receiver (a
+     module method transplanted into an including class), so its ivar-typed
+     arithmetic comes out boxed. Coerce it exactly as a supplied poly argument
+     would, rather than assigning the sp_RbVal to the slot's C type. */
+  else if (comp_ntype(c, dv) == TY_POLY) {
+    Buf db; memset(&db, 0, sizeof db);
+    /* emit_boxed, not emit_expr: a bare `@x` default typed poly in the
+       module's scope is emitted by emit_expr as the raw concrete field, so
+       wrapping it in the poly converters was invalid C (sp_int to an sp_RbVal
+       parameter). emit_boxed boxes that same field first. A genuine poly
+       expression passes through unchanged. */
+    emit_boxed(c, dv, &db);
+    const char *dx = db.p ? db.p : "sp_box_nil()";
+    if (pt == TY_INT) buf_printf(out, "sp_poly_to_i_or_nil(%s)", dx);
+    else if (pt == TY_FLOAT) buf_printf(out, "sp_poly_to_f_or_nil(%s)", dx);
+    else if (pt == TY_STRING) buf_printf(out, "sp_poly_to_s_or_nil(%s)", dx);
+    else if (pt == TY_SYMBOL) buf_printf(out, "(sp_sym)sp_poly_to_i(%s)", dx);
+    else if (pt == TY_BOOL) buf_printf(out, "sp_poly_to_i(%s)", dx);
+    else if (pt == TY_BIGINT) buf_printf(out, "sp_poly_as_bigint(%s)", dx);
+    else emit_unbox_text(c, pt, dx, out);
+    free(db.p);
+  }
   /* Same boundary promotion the supplied-argument path does: an int DEFAULT
      (`def f(x = 7)`) reaching a bigint parameter is an sp_int in a
      sp_Bigint* slot without it. */

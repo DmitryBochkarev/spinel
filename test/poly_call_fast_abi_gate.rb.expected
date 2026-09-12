@@ -51,3 +51,49 @@ adapter_set_empty: ArgumentError
 sadapter_set_short: ArgumentError
 rest_opt_short: NoMethodError
 10
+iarr_push_str: NoMethodError
+iarr_push_float: NoMethodError
+iarr_set_str: NoMethodError
+iarr_poly_push: NoMethodError
+iarr_poly_set: NoMethodError
+iarr_set_splat_after_idx: NoMethodError
+7
+[7, 2]
+iarr_get_str: TypeError
+adapter_get_short: ArgumentError
+adapter_get_proc_short: ArgumentError
+[1, 2]
+rest_kw_static: NoMethodError
+rest_post_static: NoMethodError
+rest_kw_toproc: NoMethodError
+rest_kw_toproc_short: NoMethodError
+rest_post_toproc: NoMethodError
+rest_kwrest_toproc: NoMethodError
+iarr_get_over: 1
+iarr_set_over: 9 [9, 2, 3]
+iarr_poly_push_multi: NoMethodError
+[1, 2]
+default_body_local_call: NoMethodError
+default_body_local_toproc: NoMethodError
+[100]
+[6]
+long_param_call: NoMethodError
+long_param_toproc: NoMethodError
+kwrest_unmatched: NoMethodError
+kwrest_positional_name: ArgumentError
+[1, {z: 2}]
+kwrest_gap_call: ArgumentError
+kwrest_gap_opt_call: NoMethodError
+kwrest_gap2_call: ArgumentError
+bool_arg_call: NoMethodError
+bool_arg_proc: NoMethodError
+toproc_many_params: NoMethodError
+toproc_many_params_fixed: NoMethodError
+toproc_rest_over: NoMethodError
+kwrest_toproc_empty: NoMethodError
+kwrest_toproc_kw: NoMethodError
+[1, 2, 3]
+toproc_opt_kw: NoMethodError
+toproc_rest_kw: NoMethodError
+toproc_req_kw: NoMethodError
+toproc_req_nokw: NoMethodError

@@ -166,7 +166,11 @@ sp_int sp_method_proc_tramp(void *cap, sp_int argc, sp_int *args) {
      does not match its stamped slot, the same way sp_bm_legacy_abi_ok does at
      a statically-typed call site -- `[obj.method(:m)][0].call(a_string)` and
      its `.to_proc`/spread forms otherwise fed the String pointer into an
-     sp_int parameter. */
+     sp_int parameter. The exact match is also what keeps a `false` argument
+     from reaching an int-inferred parameter: the raw slot would be 0, which
+     is TRUTHY as a Ruby Integer, so `x ? a : b` would answer the true branch
+     where CRuby answers the false one. Decline the kind change instead of
+     answering it wrong. */
   for (sp_int i = 0; i < argc && i < m->legacy_fixed; i++)
     if (!sp_bm_sig_pos_scalar_ok(sp_bm_boxed_scalar_token(_sp_proc_poly_args[i]), m->legacy_sig, i))
       sp_raise_cls("NoMethodError", "undefined method 'call' for an instance of Method");

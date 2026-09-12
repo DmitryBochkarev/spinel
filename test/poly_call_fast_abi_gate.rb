@@ -225,3 +225,201 @@ class RestOpt
 end
 expect_nome("rest_opt_short") { RestOpt.new.method(:m).call(1) }
 puts RestOpt.new.method(:m).call(1, 9).inspect
+
+# A typed-array adapter holds one element kind. CRuby's Array is
+# heterogeneous, so a value the typed array cannot hold declines with the same
+# NoMethodError the poly-slot route raises -- not an index-style TypeError and
+# not the pointer read as an Integer. An INDEX still converts (or raises
+# CRuby's TypeError), and a zero-argument `[]` call is CRuby's ArgumentError,
+# not a padded index 0.
+ia6 = [1, 2]
+expect_nome("iarr_push_str")   { ia6.method(:push).call("z") }
+expect_nome("iarr_push_float") { ia6.method(:push).call(5.5) }
+expect_nome("iarr_set_str")    { ia6.method(:[]=).call(0, "z") }
+expect_nome("iarr_poly_push")  { [ia6.method(:push)][0].call("z") }
+expect_nome("iarr_poly_set")   { [ia6.method(:[]=)][0].call(0, "z") }
+# The splat element is tagged by its ABSOLUTE adapter position: a fixed index
+# before the splat must not make the value element be treated as the index.
+strval = ["z"]
+expect_nome("iarr_set_splat_after_idx") { ia6.method(:[]=).call(0, *strval) }
+ia10 = [1, 2]
+intval = [7]
+puts ia10.method(:[]=).call(0, *intval).inspect
+puts ia10.inspect
+expect_raise("iarr_get_str")   { ia6.method(:[]).call("z") }
+expect_raise("adapter_get_short") { ia6.method(:[]).call() }
+# The `.to_proc` trampoline of a binop wrapper has the same operand parameter,
+# so the zero-argument proc call must raise too instead of reading arr[0].
+expect_raise("adapter_get_proc_short") { ia6.method(:[]).to_proc.call() }
+puts ia6.inspect
+
+# A rest target with parameters AFTER the rest (a post-rest positional, a
+# declared keyword, or `**kwrest`) cannot ride the fixed `.call` cast: the rest
+# arm builds only the parameters up to the rest, so a trailing one read an
+# unpassed register (`def m(a, *r, c: 3); m.call(1, 2, 3)` answered garbage for
+# `c`). The poly-slot route declines these; the bound-Method path declines too.
+class RestTail
+  def m(a, *r, c: 3) = [a, r, c]
+  def p(a, *r, b) = [a, r, b]
+  def req(a, *r, c:) = [a, r, c]
+end
+expect_nome("rest_kw_static")   { RestTail.new.method(:m).call(1, 2, 3) }
+expect_nome("rest_post_static") { RestTail.new.method(:p).call(1, 2, 3) }
+# The same rest-tail targets decline through Method#to_proc: the trampoline's
+# fixed positional binding read the trailing parameter's register from args[]
+# and handed the keyword hash pointer (or an unset register) to the callee,
+# whose prologue rooted it -- a SIGSEGV. A missing argument read the same way
+# instead of raising CRuby's ArgumentError, so the decline must not depend on
+# the call's count. An OPTIONAL keyword after the rest is the exception: it
+# always takes its default and is handled (see poly_method_return_kinds.rb).
+expect_nome("rest_kw_toproc")      { RestTail.new.method(:req).to_proc.call(1, 2, 3) }
+expect_nome("rest_kw_toproc_short") { RestTail.new.method(:req).to_proc.call(1) }
+expect_nome("rest_post_toproc")   { RestTail.new.method(:p).to_proc.call(1, 2, 3) }
+# A `**kwrest` after the rest is the same shape (the trailing slot has no
+# fixed C cast).
+class RestKwrest
+  def m(a, *r, **kw) = [a, r, kw]
+end
+expect_nome("rest_kwrest_toproc") { RestKwrest.new.method(:m).to_proc.call(1, 2, 3) }
+
+# Over-arity on a bound array operator is not modeled: the wrapper/adapter C
+# cast has no slot for extra operands, so they are ignored where CRuby raises
+# ArgumentError (`[]` takes 1..2, `[]=` takes 2..3); the in-range slice forms
+# are ignored the same way.
+ia7 = [1, 2, 3]
+puts "iarr_get_over: #{ia7.method(:[]).call(0, 2, 3)}"
+ia8 = [1, 2, 3]
+puts "iarr_set_over: #{ia8.method(:[]=).call(0, 9, 8).inspect} #{ia8.inspect}"
+# A multi-value `push` through a poly slot declines where the static route
+# pushes both values.
+ia9 = [1, 2]
+expect_nome("iarr_poly_push_multi") { [ia9.method(:push)][0].call(8, 9) }
+puts ia9.inspect
+
+
+# A parameter default that WRITES a method-scope local the body READS cannot be
+# answered from the bound call-site frame: the default runs there while the
+# body reads its own zeroed slot, so `def m(a, c = (z = a + 1; z)); z; end`
+# answered 0 where CRuby answers 6. The direct call is a C compile failure for
+# the same shape; these two routes decline instead of answering the zero.
+class DefaultBodyLocal
+  def m(a, c = (z = a + 1; z)) = z
+end
+expect_nome("default_body_local_call")   { DefaultBodyLocal.new.method(:m).call(5) }
+expect_nome("default_body_local_toproc") { DefaultBodyLocal.new.method(:m).to_proc.call(5) }
+
+# A caller local spelled exactly like the frame's old rename prefix must not be
+# captured by the callee-local declaration; the unique name now begins with an
+# uppercase letter, which no Ruby local can.
+class RenameSpell
+  def m(a, c = (z = a + 1; z)) = [c]
+end
+_bm1_z = 100
+puts RenameSpell.new.method(:m).call(5, _bm1_z).inspect
+
+# A default-created local whose name overflows the rename table's source
+# buffer is left unrenamed in BOTH the declaration and the default (a longer
+# name used to declare lv_Bm1_<name> while the default read an undeclared
+# lv_<name> -- a C compile failure).
+class LongLocal
+  def m(a, c = (zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz = a + 1; zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz)) = [c]
+end
+puts LongLocal.new.method(:m).call(5).inspect
+
+# A PARAMETER name longer than the rename table's source buffer cannot ride the
+# alias registration that lets a default read an earlier parameter at the call
+# site. The old code truncated the source name but still declared the aliased
+# temp, so a default referencing the parameter emitted the undeclared
+# `lv_<name>` -- a C compile failure. Decline both routes instead.
+class LongParam
+  def m(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,
+        b = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa + 1) = [b]
+end
+expect_nome("long_param_call")   { LongParam.new.method(:m).call(5) }
+expect_nome("long_param_toproc") { LongParam.new.method(:m).to_proc.call(5) }
+
+# A keyword argument that names no declared keyword parameter must not bind to
+# a positional one by name: CRuby sends it to `**kwrest`. When the trailing
+# hash cannot be placed the bound `.call` cast declines, and with a declared
+# keyword parameter before the kwrest the old code emitted an `sp_int`
+# initialized from a hash pointer -- a C build failure (and without one it
+# answered a mis-bound positional). A kwrest-only target whose keys are all
+# unknown still maps the whole hash into its single `**kwrest` slot when the
+# positional arguments already fill the parameters before it, and now raises
+# CRuby's ArgumentError (not NoMethodError) when a required positional is
+# missing or too many positionals are supplied (`method_call_count_violation`
+# no longer skips kwrest targets).
+class KwRest
+  def d(a, k: 1, **kw) = [a, k, kw]
+  def w(a, **kw) = [a, kw]
+  def w2(a, b = 5, **kw) = [a, b, kw]
+end
+expect_nome("kwrest_unmatched")       { KwRest.new.method(:d).call(1, z: 2) }
+expect_raise("kwrest_positional_name") { KwRest.new.method(:w).call(a: 2) }
+puts KwRest.new.method(:w).call(1, z: 2).inspect
+# A kwrest-only target whose positional parameters are not already filled by
+# the call cannot route the trailing hash to its kwrest slot: the fixed
+# positional fallback bound the hash to a scalar parameter and the generated C
+# failed to compile (`def w(a, **kw); w.call(z: 2)`). A missing positional now
+# raises CRuby's ArgumentError; the optional-gap shape declines.
+expect_raise("kwrest_gap_call")     { KwRest.new.method(:w).call(z: 2) }
+expect_nome("kwrest_gap_opt_call") { KwRest.new.method(:w2).call(1, z: 2) }
+expect_raise("kwrest_gap2_call")   { KwRest.new.method(:w2).call(z: 2) }
+
+# A `false` argument to an int-inferred parameter must decline on both the
+# static and the generic-trampoline routes: the raw sp_int slot would be 0,
+# which is a truthy Ruby Integer, so `x ? a : b` would answer the true branch
+# where CRuby answers the false one.
+class BoolArg
+  def pick(x) = x ? "t" : "f"
+end
+BoolArg.new.pick(1)
+expect_nome("bool_arg_call") { [BoolArg.new.method(:pick)][0].call(false) }
+expect_nome("bool_arg_proc") { [BoolArg.new.method(:pick)][0].to_proc.call(false) }
+
+# The proc ABI carries at most 16 positional slots. A statically-known target
+# with MORE than 16 parameters cannot ride the per-site `.to_proc` trampoline:
+# its call expression read `args[16]` past the caller's `(sp_int[16])` array
+# (a garbage argument, or a crash for a pointer parameter) instead of raising.
+# Both the non-splat and the splatted form decline, as does a rest target given
+# more than 16 arguments (whose surplus the rest loop silently dropped). CRuby
+# answers these; spinel's decline is the documented 16-slot ABI limit.
+class ManyParams
+  def m17(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17)
+    a1 + a17
+  end
+  def rest(a, *r) = [a, r]
+end
+many = (1..17).to_a
+expect_nome("toproc_many_params") { ManyParams.new.method(:m17).to_proc.call(*many) }
+expect_nome("toproc_many_params_fixed") { ManyParams.new.method(:m17).to_proc.call(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17) }
+many_rest = (1..20).to_a
+expect_nome("toproc_rest_over") { ManyParams.new.method(:rest).to_proc.call(*many_rest) }
+
+# A `**kwrest` target cannot ride the fixed positional `to_proc` cast: the proc
+# ABI carries no keyword channel, so the bind==0 arm read an uninitialized
+# register as the sp_SymPolyHash* and the callee dereferenced it -- a SIGSEGV.
+# Decline with the same NoMethodError the rest-tail shapes use. (The direct
+# `.call` supports the shape: see poly_method_return_kinds.rb.)
+class KwRestProc
+  def m(a, **k) = [a, k]
+end
+expect_nome("kwrest_toproc_empty") { KwRestProc.new.method(:m).to_proc.call(1) }
+expect_nome("kwrest_toproc_kw")    { KwRestProc.new.method(:m).to_proc.call(1, z: 2) }
+
+# A declared keyword parameter cannot be supplied through the proc ABI: the
+# trailing keyword hash reaches the trampoline as one more positional and was
+# bound to the next parameter's sp_int slot (`def m(a, b = a + 1, c: 3)`
+# answered `[1, <garbage>, 3]` for `.to_proc.call(1, c: 5)`). The keyword-less
+# call still takes the defaults; a runtime trailing hash and every REQUIRED
+# keyword target decline.
+class KwProc
+  def opt(a, b = a + 1, c: 3) = [a, b, c]
+  def rest(a, *r, c: 3) = [a, r, c]
+  def req(a, c:) = [a, c]
+end
+puts KwProc.new.method(:opt).to_proc.call(1).inspect
+expect_nome("toproc_opt_kw")   { KwProc.new.method(:opt).to_proc.call(1, c: 5) }
+expect_nome("toproc_rest_kw")  { KwProc.new.method(:rest).to_proc.call(1, c: 5) }
+expect_nome("toproc_req_kw")   { KwProc.new.method(:req).to_proc.call(1, c: 9) }
+expect_nome("toproc_req_nokw") { KwProc.new.method(:req).to_proc.call(1) }

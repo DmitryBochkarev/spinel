@@ -926,6 +926,7 @@ void emit_float_coerce_expr(Compiler *c, int node, Buf *b);
    raise survives but the struct never reaches an int/float slot. */
 void emit_scalar_operand(Compiler *c, int node, const char *zero, Buf *b);
 void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol);
+void declare_local_named(Compiler *c, Buf *b, LocalVar *lv, const char *name, int vol);
 void emit_cell_shadow_store(Compiler *c, Scope *encl, const char *name, Buf *b, int indent);
 int scope_has_begin(Compiler *c, int si);
 void emit_scope_decls(Compiler *c, Scope *s, Buf *b);

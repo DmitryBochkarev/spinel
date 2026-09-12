@@ -1063,6 +1063,31 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
       return;
     }
   }
+  /* An instance-variable read whose node type came from a different class
+     than the one whose struct it reads: a module method transplanted into an
+     including class types `@x` in the module's own scope (there poly/unknown)
+     while the emitted field lives on the including class. Box the concrete
+     field so the two agree -- `sp_poly_add(self->iv_x, ...)` fed sp_int to an
+     sp_RbVal parameter and did not compile. */
+  if (t == TY_POLY && g_emitting_class_id >= 0 &&
+      nt_kind(c->nt, node) == NK_InstanceVariableReadNode) {
+    Scope *sc0 = comp_scope_of(c, node);
+    if (!sc0 || sc0->class_id != g_emitting_class_id) {
+      const char *nm0 = nt_str(c->nt, node, "name");
+      int iv0 = nm0 ? comp_ivar_index(&c->classes[g_emitting_class_id], nm0) : -1;
+      TyKind ft0 = iv0 >= 0 ? c->classes[g_emitting_class_id].ivar_types[iv0] : TY_UNKNOWN;
+      if (ft0 != TY_POLY && ft0 != TY_UNKNOWN) {
+        Buf ib; memset(&ib, 0, sizeof ib);
+        unsigned char sv_m0 = c->strbuf_box[node];
+        c->strbuf_box[node] = 0;
+        emit_expr(c, node, &ib);
+        c->strbuf_box[node] = sv_m0;
+        emit_boxed_text(c, ft0, ib.p ? ib.p : "0", b);
+        free(ib.p);
+        return;
+      }
+    }
+  }
   if (t == TY_POLY) {
     emit_expr(c, node, b);
     return;
@@ -1317,6 +1342,15 @@ void emit_cell_shadow_store(Compiler *c, Scope *encl, const char *name, Buf *b, 
 }
 
 void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
+  declare_local_named(c, b, lv, lv->name, vol);
+}
+
+/* declare_local's body with the C name decoupled from lv->name. An inlined
+   callee's frame (the Method#to_proc trampoline is separate, but the bound
+   `.call` statement expression shares the caller's scope) declares its
+   method-scope locals under per-frame unique names so a same-named caller
+   local in an argument expression is not captured by the declaration. */
+void declare_local_named(Compiler *c, Buf *b, LocalVar *lv, const char *name, int vol) {
   TyKind t = lv->type;
   Buf cty; memset(&cty, 0, sizeof cty);
   const char *init = "0";
@@ -1360,8 +1394,8 @@ void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
   if (vol && !ptr) buf_puts(b, "volatile ");
   buf_puts(b, cty.p ? cty.p : "");
   if (vol && ptr) buf_puts(b, "volatile ");  /* cty ends with "* "; -> "* volatile " */
-  buf_printf(b, " lv_%s = %s;\n", lv->name, init);
-  if (t == TY_POLY) buf_printf(b, "    SP_GC_ROOT_RBVAL(lv_%s);\n", lv->name);
+  buf_printf(b, " lv_%s = %s;\n", name, init);
+  if (t == TY_POLY) buf_printf(b, "    SP_GC_ROOT_RBVAL(lv_%s);\n", name);
   /* A String range is a by-value struct carrying two GC strings, so the
      struct's own address is not a root the collector can follow -- it would
      read the first endpoint as if it were the object. Each endpoint slot is
@@ -1370,8 +1404,8 @@ void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
      them: `("a#{i}".."z#{i}")` read back wrong on 14 of 400 turns plainly and
      on all 400 under GC stress (#4353 left this open). */
   else if (t == TY_STR_RANGE) {
-    buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.first);\n", lv->name);
-    buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.last);\n", lv->name);
+    buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.first);\n", name);
+    buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.last);\n", name);
   }
   /* A String slot takes the STRING root form, not the object one. Both reach
      an ordinary heap string, but a mutable String's PAYLOAD (marker 0xfd) is
@@ -1383,15 +1417,15 @@ void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
      root fiber precisely so that tag test SKIPS it, so the two meanings can
      only be told apart by knowing the slot holds a string, which is what the
      tag on the root entry says. */
-  else if (root && t == TY_STRING) buf_printf(b, "    SP_GC_ROOT_STR(lv_%s);\n", lv->name);
-  else if (root && !comp_ty_value_obj(c, t)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+  else if (root && t == TY_STRING) buf_printf(b, "    SP_GC_ROOT_STR(lv_%s);\n", name);
+  else if (root && !comp_ty_value_obj(c, t)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", name);
   else if (comp_ty_value_obj(c, t)) {
     /* a value-type local lives on the stack; root each heap-pointer (string)
        field so its referent survives GC. The field slot is a stable root. */
     ClassInfo *vc = &c->classes[ty_object_class(t)];
     for (int i = 0; i < vc->nivars; i++)
       if (vc->ivar_types[i] == TY_STRING)
-        buf_printf(b, "    SP_GC_ROOT(lv_%s.iv_%s);\n", lv->name, iv_c(vc->ivars[i] + 1));
+        buf_printf(b, "    SP_GC_ROOT(lv_%s.iv_%s);\n", name, iv_c(vc->ivars[i] + 1));
   }
   free(cty.p);
 }
