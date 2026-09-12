@@ -950,4 +950,33 @@ rm -f "$WORK/wrapcc.log"
 OUT2=$( cd build/pack/packer && ./packer 2>&1 | tail -2 | tr '\n' '|' )
 expect "pack honours CC and answers the same" "$REF" "$OUT2"
 
+# A cross build for a target without pthread. The host has it; the recipient's
+# $(CC) may not, and the packer cannot know. This "device" toolchain has no
+# <pthread.h> and refuses -pthread/-lpthread. The threaded pack above must stop
+# at make's first line with the reason, not forty files in on the header;
+# a pack of a program without threads must build and run with the same cc,
+# since the single-threaded runtime needs no pthread at all.
+mkdir -p "$WORK/nopt/inc"
+printf '#error "no pthread on this target"\n' > "$WORK/nopt/inc/pthread.h"
+cat > "$WORK/nopt/cc" <<NOPTEOF
+#!/bin/sh
+for a in "\$@"; do case "\$a" in -lpthread|-pthread) echo "nopthread-cc: unknown option \$a" >&2; exit 1;; esac; done
+exec ${CC:-cc} -I"$WORK/nopt/inc" "\$@"
+NOPTEOF
+chmod +x "$WORK/nopt/cc"
+NOPT_OUT=$( cd build/pack/packer && make clean >/dev/null 2>&1; make -j4 CC="$WORK/nopt/cc" 2>&1 || true )
+case "$NOPT_OUT" in
+  *"uses Thread"*"has no pthread"*) ;;
+  *) fail "pack: a threaded pack on a target without pthread did not name the reason: $NOPT_OUT" ;;
+esac
+cd "$WORK"
+"$SPIN" new plainpack >/dev/null || fail "pack: new plainpack"
+cd plainpack
+printf 'puts "plain #{[1, 2, 3].sum}"\n' > bin/plainpack.rb
+"$SPIN" pack >/dev/null 2>&1 || fail "pack: spin pack plainpack"
+grep -q "SP_PTHREAD" build/pack/plainpack/Makefile && fail "pack: an unthreaded pack carries the pthread probe"
+( cd build/pack/plainpack && make -j4 CC="$WORK/nopt/cc" >/dev/null 2>&1 ) || \
+  fail "pack: an unthreaded pack did not build on a target without pthread"
+expect "an unthreaded pack runs on a target without pthread" "plain 6" "$( cd build/pack/plainpack && ./plainpack 2>&1 )"
+
 echo "spin-e2e: ALL GREEN"

@@ -1387,6 +1387,24 @@ end
 # defines (SP_THREADS above all), and a mismatched one links and then misbehaves
 # at run time, because the generated TU writes its own externs and nothing
 # cross-checks them.
+# The make-time check a THREADED pack carries. The program uses Thread, so its
+# runtime is compiled with -DSP_THREADS and needs pthread from the compiler
+# that builds it -- the recipient's $(CC), which may be a cross compiler for a
+# target that has none. The packer's host says nothing about that, so the
+# question is asked where the answer lives: a compile-and-link probe with
+# $(CC), and a make error naming the reason, in place of the pthread.h error
+# forty files into the build. A pack of a program without threads carries no
+# probe and needs no pthread.
+def pack_pthread_probe(name)
+  "# This program uses Thread, so its runtime needs pthread from $(CC)'s target.\n" \
+  "# Asked of $(CC) itself: a cross compiler for a target without pthread must\n" \
+  "# say so here, not forty files in.\n" \
+  "SP_PTHREAD := $(shell printf '#include <pthread.h>\\nstatic void *f(void *a){return a;}\\nint main(void){pthread_t t;return pthread_create(&t,0,f,0)!=0;}\\n' > .sp_pthread_probe.c && $(CC) -pthread .sp_pthread_probe.c -o .sp_pthread_probe >/dev/null 2>&1 && echo yes; rm -f .sp_pthread_probe.c .sp_pthread_probe)\n" \
+  "ifneq ($(SP_PTHREAD),yes)\n" \
+  "$(error #{name} uses Thread (Thread/Mutex/Queue/...) and $(CC) has no pthread: it cannot be built for this target)\n" \
+  "endif\n"
+end
+
 def cmd_pack(prj, targets, outdir)
   bins = prj.bins
   spin_die("no bin/*.rb executables to pack") if bins.empty?
@@ -1437,6 +1455,7 @@ def cmd_pack(prj, targets, outdir)
   libs = ""
   natives = ""
   rtdir = ""
+  threaded = false   # the program uses Thread: its runtime needs pthread on the recipient
   report.each_line do |ln|
     ln = ln.chomp
     sp = ln.index(" ")
@@ -1446,6 +1465,7 @@ def cmd_pack(prj, targets, outdir)
     next if val == ""
     if kind == "define" || kind == "cflag"
       cflags += " " + val
+      threaded = true if val == "-DSP_THREADS"
     elsif kind == "lib"
       # -lcrypt is the one ingredient the compiler reports for ITS platform
       # rather than the program's: String#crypt is libc crypt(3), which glibc
@@ -1525,7 +1545,7 @@ def cmd_pack(prj, targets, outdir)
 "        "CC ?= cc
 "        "CFLAGS ?= -O2#{cflags} -Ilib -Ilib/regexp
 "        "LIBS ?=#{libs}
-"        "# String#crypt is libc crypt(3): a separate library on glibc, inside
+"        "#{threaded ? pack_pthread_probe(name) : ""}"        "# String#crypt is libc crypt(3): a separate library on glibc, inside
 "        "# libSystem on Darwin. The recipient's platform decides, not the packer's.
 "        "ifneq ($(shell uname -s),Darwin)
 "        "LIBS += -lcrypt

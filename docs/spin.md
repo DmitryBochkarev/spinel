@@ -458,6 +458,16 @@ is libc `crypt(3)`, a separate `-lcrypt` on glibc and part of libSystem on
 Darwin, and the Makefile decides that from `uname` where it runs, so a pack
 made on a Mac links on Linux and the other way round.
 
+**Threads need pthread on the target, and only there.** A program that uses
+`Thread` (or `Mutex`, `Queue`, ...) compiles its runtime with `-DSP_THREADS`
+and links `-lpthread`; one that does not needs no pthread at all, so it
+cross-builds for a target without threads as it is. The threaded pack's
+Makefile asks `$(CC)` whether its target has pthread before compiling anything
+(a compile-and-link probe, run once), and stops with `<name> uses Thread ...
+and <cc> has no pthread: it cannot be built for this target` when it does not,
+instead of failing on `<pthread.h>` somewhere inside the runtime. The packer's
+own host has no say in it: it may well have pthread when the device does not.
+
 ## Rebuilds
 
 `spin build`/`run`/`test` skip recompilation when nothing changed (input
