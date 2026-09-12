@@ -94,6 +94,9 @@ void sp_curry_publish_args(sp_Curry *c);
    sp_bm_box_ret matches on the low byte. */
 #define SP_BM_RET_OBJ       8
 #define SP_BM_RET_OBJ_DYN   9
+/* A Bigint return: a nullable `sp_Bigint *` riding the register, boxed into
+   the Ruby value it points at (NULL boxes as nil). */
+#define SP_BM_RET_BIGINT   10
 #define SP_BM_RET_KIND(r)   ((r) & 0xff)
 #define SP_BM_RET_OBJ_OF(cls) (SP_BM_RET_OBJ | ((sp_int)(cls) << 8))
 typedef struct sp_BoundMethod { void *self; sp_int fn; const char *name; sp_int arity;
@@ -144,7 +147,8 @@ static inline sp_BoundMethod *sp_bm_set_abi(sp_BoundMethod *m, sp_int recv_bound
    the bind site recorded. A regular method is always SP_BM_RET_INT; a typed
    array adapter that returns self (push) or a laundered element (StrArray
    get/set) boxes the real value instead of mis-tagging the pointer as an
-   Integer (#4395). SP_BM_RET_INT goes through sp_box_int_or_nil: an IntArray
+   Integer (#4395). A Bigint pointer boxes into its Ruby value. SP_BM_RET_INT
+   goes through sp_box_int_or_nil: an IntArray
    `[]` out of range answers the nullable SP_INT_NIL sentinel (INTPTR_MIN),
    which sp_box_int would hand back as a truthy Integer instead of nil, and a
    regular TY_INT method uses the same reserved sentinel for nil (see
@@ -161,6 +165,7 @@ static inline sp_RbVal sp_bm_box_ret(sp_BoundMethod *m, sp_int raw) {
     case SP_BM_RET_SYM:       return (sp_sym)raw != (sp_sym)-1 ? sp_box_sym((sp_sym)raw) : sp_box_nil();
     case SP_BM_RET_OBJ:       return sp_box_nullable_obj((void *)(uintptr_t)raw, (int)(r >> 8));
     case SP_BM_RET_OBJ_DYN:   return sp_box_nullable_obj_dyn((void *)(uintptr_t)raw, 0);
+    case SP_BM_RET_BIGINT:    return raw ? sp_box_bigint((sp_Bigint *)(uintptr_t)raw) : sp_box_nil();
     default:                  return sp_box_int_or_nil(raw);
   }
 }

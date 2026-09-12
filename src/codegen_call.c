@@ -4687,23 +4687,26 @@ static int method_legacy_int_abi(Compiler *c, int mi, int recv_bound, char *out_
      Method carries a receiver" flag). */
   int is_bam = m->name && strncmp(m->name, "__bam_", 6) == 0;
   int pstart = (is_bam && recv_bound && m->nparams > 0) ? 1 : 0;
-  /* How the raw sp_int C return boxes. A regular Method arm boxes with the
-     Integer default, so ONLY a TY_INT return is correct there: TY_NIL/
-     TY_UNKNOWN are emitted as `void` (the cast reads an undefined register),
-     and a bool is a 1-byte `sp_bool` (the sp_int cast reads undefined upper
-     register bytes) while a symbol is an sp_int carrying a Symbol id -- both
-     would box as the wrong Ruby value (true -> a garbage Integer, :sym -> its
-     id). A pointer/poly/float/struct return is a different type entirely.
-     A synthesized __bam_ wrapper may instead launder a String through the
-     register (a StrArray element from `[]`); its C return is `const char *`,
-     so sp_bm_box_ret's String kind boxes it correctly. Allow only the
-     wrapper shape, where spinel owns the ABI. */
+  /* How the raw sp_int C return boxes. A method whose C return is not an
+     sp_int at all declines below: TY_NIL/TY_UNKNOWN are emitted as `void`
+     (the cast reads an undefined register), a bool is a 1-byte `sp_bool`
+     (the sp_int cast reads undefined upper register bytes) while a symbol is
+     an sp_int carrying a Symbol id -- both would box as the wrong Ruby value
+     (true -> a garbage Integer, :sym -> its id). A float return comes back in
+     a different register and a value struct is not a register value at all.
+     The kinds that DO ride the register and have a matching box arm are
+     enumerated here: a String return is `const char *` (a plain method's C
+     return exactly like the synthesized __bam_ wrapper's -- a StrArray
+     element laundered from `[]`), a Bigint return is a nullable `sp_Bigint *`,
+     and the array/object kinds are pointers. Each maps to its sp_bm_box_ret
+     arm so the register is boxed as the Ruby value it really is. */
   if (m->ret == TY_INT) { if (out_ret) *out_ret = 0; /* SP_BM_RET_INT */ }
-  /* A String return is a `const char *` in the register, for a regular
-     method as much as for a wrapper that launders one: the kind boxes it.
-     Declining it left `resolver.call` on a String-returning target with no
-     stamp, and the typed-receiver call then raised (#4445). */
+  /* A plain String-returning method's C return is `const char *` just like
+     the wrapper's: sp_bm_box_ret's STR arm boxes a NULL as nil. */
   else if (m->ret == TY_STRING) { if (out_ret) *out_ret = 1; /* SP_BM_RET_STR */ }
+  /* A Bigint return is a nullable `sp_Bigint *` riding the register; the box
+     arm allocates the Ruby value (or nil for a NULL pointer). */
+  else if (m->ret == TY_BIGINT) { if (out_ret) *out_ret = 10; /* SP_BM_RET_BIGINT */ }
   /* A method whose value is nil (a void C function) is called for its effect
      and answers nil: the store-table callbacks of optcarrot's CPU are these
      (`def poke_ram(addr, data) ... end`), read out of a poly array and called
